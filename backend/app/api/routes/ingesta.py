@@ -11,6 +11,7 @@ from app.models.ingesta import (
     EstadoIngesta,
 )
 from app.services.ingesta.pdf_service import pdf_service, PDFNoProcessableError
+from app.services.externo.verificacion_service import verificacion_service
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
@@ -198,6 +199,10 @@ async def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
         grafo_carga_service.cargar_documento(documento_id, ruta_pdf.name)
         grafo_carga_service.cargar_referencias(documento_id, referencias)
         grafo_carga_service.cargar_citas(documento_id, citas)
+
+        # NUEVO
+        actualizar(80, "Verificando referencias en CrossRef...")
+        verificacion_service.verificar_referencias(referencias, documento_id)
 
         _progreso[documento_id] = ProgresoAuditoriaResponse(
             documento_id=documento_id,

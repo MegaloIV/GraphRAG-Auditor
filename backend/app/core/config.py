@@ -16,7 +16,10 @@ class Settings(BaseSettings):
     # Groq
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
-    
+
+    # CrossRef / Unpaywall
+    crossref_email: str = "malcaldel1@upao.edu.pe"
+
     # Neo4j
     neo4j_uri: str = ""
     neo4j_username: str = "neo4j"

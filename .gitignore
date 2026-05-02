@@ -2,3 +2,4 @@
 .env
 Keys/
 backend/data/
+backend/data/chromadb/
