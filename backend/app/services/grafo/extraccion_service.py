@@ -138,7 +138,7 @@ class EntidadExtractionService:
         Detección rápida con regex antes de llamar al LLM.
         Evita gastar tokens si el documento no tiene citas APA.
         """
-        patron_parentetica = r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+et\s+al\.)?(?:\s*[,&]\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?,\s*\d{4}\)'
+        patron_parentetica = r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+et\s+al\.)?(?:\s*[,&]\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?,\s*\d{4}(?:,\s*p{1,2}\.\s*\d+(?:-\d+)?)?\)'
         patron_narrativa = r'[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+et\s+al\.)?\s*\(\d{4}\)'
 
         encontradas = re.findall(patron_parentetica, texto)
