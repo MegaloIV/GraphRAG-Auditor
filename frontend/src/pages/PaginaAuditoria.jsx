@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import Navbar from '../components/ui/Navbar'
 import Card from '../components/ui/Card'
 import ProgresoAuditoria from '../components/ingesta/ProgresoAuditoria'
 import ListaReferencias from '../components/grafo/ListaReferencias'
 import ListaCitas from '../components/grafo/ListaCitas'
 import ResumenGrafo from '../components/grafo/ResumenGrafo'
-import { ingestaAPI, grafoAPI } from '../api/client'
+import { grafoAPI } from '../api/client'
 
 const TABS = [
   { id: 'progreso',    label: 'Progreso',    icono: '⏳' },
@@ -27,8 +27,6 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
   const [referencias, setReferencias] = useState(null)
   const [citas, setCitas] = useState(null)
   const [resumenGrafo, setResumenGrafo] = useState(null)
-  const intervalRef = useRef(null)
-  const intentosFallidosRef = useRef(0)
 
   useEffect(() => {
     const cargarResultados = async () => {
@@ -46,43 +44,31 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
       }
     }
 
-    const polling = async () => {
+    const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api/v1'
+    const eventSource = new EventSource(`${API_BASE}/ingesta/${documentoId}/progreso`)
+
+    eventSource.onmessage = (event) => {
       try {
-        const response = await ingestaAPI.verProgreso(documentoId)
-        const datos = response.data
-        intentosFallidosRef.current = 0
+        const datos = JSON.parse(event.data)
         setProgreso(datos)
 
         if (datos.estado === 'completado') {
-          clearInterval(intervalRef.current)
+          eventSource.close()
           cargarResultados()
         } else if (datos.estado === 'error') {
-          clearInterval(intervalRef.current)
+          eventSource.close()
         }
-      } catch {
-        intentosFallidosRef.current += 1
-        // Solo asumir completado después de 5 intentos fallidos (~12.5s)
-        if (intentosFallidosRef.current >= 5) {
-          clearInterval(intervalRef.current)
-          setProgreso(prev => ({
-            ...prev,
-            estado: 'completado',
-            porcentaje: 100,
-            mensaje_progreso: 'Auditoría completada.',
-          }))
-          cargarResultados()
-        }
+      } catch (err) {
+        console.error('Error parseando SSE:', err)
       }
     }
 
-    const timer = setTimeout(() => {
-      intervalRef.current = setInterval(polling, 2500)
-      polling()
-    }, 1000)
+    eventSource.onerror = () => {
+      eventSource.close()
+    }
 
     return () => {
-      clearTimeout(timer)
-      clearInterval(intervalRef.current)
+      eventSource.close()
     }
   }, [documentoId])
 
@@ -170,7 +156,7 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
         {tabActiva === 'progreso' && (
           <Card
             titulo="Estado del pipeline"
-            subtitulo="Actualización cada 2.5 segundos"
+            subtitulo="Actualizando en tiempo real"
             icono="⏳"
           >
             <ProgresoAuditoria progreso={progreso} />
@@ -240,4 +226,4 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
       </div>
     </div>
   )
-}
+} 

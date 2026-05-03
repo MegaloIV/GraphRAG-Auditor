@@ -2,7 +2,9 @@ import json
 import uuid
 from pathlib import Path
 import structlog
+import asyncio 
 from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks
+from sse_starlette.sse import EventSourceResponse
 
 from app.core.config import get_settings
 from app.models.ingesta import (
@@ -134,22 +136,49 @@ async def ver_estructura(documento_id: str):
 
 @router.get(
     "/{documento_id}/progreso",
-    response_model=ProgresoAuditoriaResponse,
-    summary="HU-003: Consultar progreso de auditoría",
+    summary="HU-003: Stream de progreso en tiempo real (SSE)",
 )
 async def ver_progreso(documento_id: str):
-    progreso = _leer_progreso(documento_id)
-    if not progreso:
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "codigo": "AUDITORIA_NO_INICIADA",
-                "mensaje": "No hay auditoría activa para este documento.",
-                "accion_sugerida": "Carga el documento primero.",
-            },
-        )
-    return progreso
+    """
+    Server-Sent Events — el backend empuja el progreso al frontend
+    en tiempo real sin polling.
+    """
+    async def generador():
+        ultimo_porcentaje = -1
+        intentos_sin_cambio = 0
 
+        while True:
+            progreso = _leer_progreso(documento_id)
+
+            if not progreso:
+                # Aún no existe el archivo, esperar
+                await asyncio.sleep(0.5)
+                intentos_sin_cambio += 1
+                if intentos_sin_cambio > 20:
+                    yield {
+                        "data": json.dumps({
+                            "estado": "error",
+                            "porcentaje": 0,
+                            "mensaje_progreso": "No se encontró la auditoría.",
+                            "error": "Documento no encontrado."
+                        })
+                    }
+                    break
+                continue
+
+            # Solo enviar si cambió el porcentaje
+            if progreso.porcentaje != ultimo_porcentaje:
+                ultimo_porcentaje = progreso.porcentaje
+                intentos_sin_cambio = 0
+                yield {"data": progreso.model_dump_json()}
+
+            # Terminar el stream cuando complete o falle
+            if progreso.estado in ("completado", "error"):
+                break
+
+            await asyncio.sleep(0.5)
+
+    return EventSourceResponse(generador())
 
 async def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
     from app.services.grafo.extraccion_service import extraccion_service

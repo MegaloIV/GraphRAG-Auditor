@@ -28,21 +28,31 @@ class VerificacionService:
         self,
         referencias: list[ReferenciaAPA],
         documento_id: str,
+        max_referencias: int = 1,  # Límite para pruebas
     ) -> dict:
         """
-        Verifica todas las referencias de un documento.
-        Retorna un resumen del proceso.
+        Verifica las referencias de un documento.
+        max_referencias: limita cuántas verificar (útil en desarrollo)
         """
-        total = len(referencias)
+        referencias_a_verificar = referencias[:max_referencias]
+        total = len(referencias_a_verificar)
+        omitidas = len(referencias) - total
+        
         encontradas = 0
         con_abstract = 0
         con_texto_completo = 0
         no_encontradas = 0
 
-        logger.info("iniciando_verificacion", total=total, doc_id=documento_id)
+        logger.info(
+            "iniciando_verificacion",
+            total=total,
+            omitidas=omitidas,
+            doc_id=documento_id
+        )
+        
 
-        for i, referencia in enumerate(referencias):
-            logger.info(
+        for i, referencia in enumerate(referencias_a_verificar):           
+                logger.info(
                 "verificando_referencia",
                 numero=i + 1,
                 total=total,
