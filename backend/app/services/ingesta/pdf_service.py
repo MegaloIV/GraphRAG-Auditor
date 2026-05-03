@@ -17,10 +17,17 @@ settings = get_settings()
 # Patrones para detectar secciones por su título
 PATRONES_SECCIONES: dict[TipoSeccion, list[str]] = {
     TipoSeccion.REFERENCIAS: [
-        r"^referencias?\s*$",
-        r"^bibliograf[íi]a\s*$",
-        r"^references?\s*$",
-        r"^works?\s+cited\s*$",
+    r"^referencias?\s*$",
+    r"^bibliograf[íi]a\s*$",
+    r"^references?\s*$",
+    r"^works?\s+cited\s*$",
+    # Agregar estos:
+    r"^referencias?\s+bibliogr[áa]ficas?\s*$",
+    r"^lista\s+de\s+referencias?\s*$",
+    r"^fuentes?\s+bibliogr[áa]ficas?\s*$",
+    r"^fuentes?\s+de\s+consulta\s*$",
+    r"^\d+[\.\s]+referencias?\s*$",
+    r"^\d+[\.\s]+bibliograf[íi]a\s*$",
     ],
     TipoSeccion.INTRODUCCION: [
         r"^introducci[oó]n\s*$",
