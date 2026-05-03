@@ -9,9 +9,8 @@ Flujo por referencia:
 4. Neo4j     → actualizar nodo Referencia con resultados
 """
 import structlog
-from typing import Optional
 
-from app.services.externo.crossref_service import crossref_service, ResultadoCrossRef
+from app.services.externo.crossref_service import crossref_service
 from app.services.externo.unpaywall_service import unpaywall_service
 from app.services.externo.embedding_service import embedding_service
 from app.services.grafo.neo4j_service import neo4j_service
@@ -28,7 +27,7 @@ class VerificacionService:
         self,
         referencias: list[ReferenciaAPA],
         documento_id: str,
-        max_referencias: int = 1,  # Límite para pruebas
+        max_referencias: int = 5,
     ) -> dict:
         """
         Verifica las referencias de un documento.
@@ -37,7 +36,7 @@ class VerificacionService:
         referencias_a_verificar = referencias[:max_referencias]
         total = len(referencias_a_verificar)
         omitidas = len(referencias) - total
-        
+
         encontradas = 0
         con_abstract = 0
         con_texto_completo = 0
@@ -49,10 +48,9 @@ class VerificacionService:
             omitidas=omitidas,
             doc_id=documento_id
         )
-        
 
-        for i, referencia in enumerate(referencias_a_verificar):           
-                logger.info(
+        for i, referencia in enumerate(referencias_a_verificar):
+            logger.info(
                 "verificando_referencia",
                 numero=i + 1,
                 total=total,
@@ -71,7 +69,6 @@ class VerificacionService:
             elif resultado["nivel_confianza"] == "abstract":
                 con_abstract += 1
 
-            # Actualizar nodo en Neo4j con los resultados
             self._actualizar_neo4j(referencia.referencia_id, resultado)
 
         resumen = {
@@ -89,9 +86,7 @@ class VerificacionService:
     def _verificar_una_referencia(self, referencia: ReferenciaAPA) -> dict:
         """
         Verifica una sola referencia pasando por todas las capas.
-        Retorna un dict con los resultados.
         """
-        # ── CAPA 1: CrossRef ─────────────────────────────────
         resultado_crossref = crossref_service.buscar_referencia(
             titulo=referencia.titulo,
             autores=referencia.autores,
@@ -110,9 +105,7 @@ class VerificacionService:
         texto_disponible = resultado_crossref.abstract
         nivel_confianza = "abstract" if texto_disponible else None
 
-        # ── CAPA 2: Unpaywall (si hay DOI) ───────────────────
         if doi:
-            # Verificar cache primero
             if embedding_service.paper_ya_indexado(doi):
                 logger.info("paper_ya_en_cache", doi=doi)
                 return {
@@ -129,7 +122,6 @@ class VerificacionService:
                 nivel_confianza = "texto_completo"
                 logger.info("usando_texto_completo", doi=doi)
 
-        # ── CAPA 3: Generar embedding ─────────────────────────
         if texto_disponible and doi:
             metadata = {
                 "doi": doi,

@@ -3,7 +3,7 @@ import re
 import uuid
 import structlog
 
-from app.services.llm.groq_client import llm_service
+from app.services.llm.openai_client import llm_service
 from app.models.grafo import ReferenciaAPA, CitaEnTexto, TipoCita
 
 logger = structlog.get_logger(__name__)
@@ -41,23 +41,20 @@ class EntidadExtractionService:
     def extraer_referencias(self, texto: str) -> list[ReferenciaAPA]:
         """
         Extrae SOLO la sección de referencias, no todo el documento.
-        Reduce las llamadas al LLM de 14 a 1 o 2 máximo.
         """
-        # Buscar donde empieza la sección de referencias
         patron = r'(?i)^(\*{1,2})?\s*#{0,3}\s*(referencias?\s*bibliogr[áa]ficas?|referencias?|bibliograf[íi]a|references?|works?\s+cited|fuentes?\s+bibliogr[áa]ficas?|fuentes?\s+de\s+consulta|\d+[\.\s]+referencias?|\d+[\.\s]+bibliograf[íi]a)\s*(\*{1,2})?\s*$'
         match = re.search(patron, texto, re.MULTILINE)
         if match:
             texto_referencias = texto[match.start():]
             logger.info("seccion_referencias_encontrada", chars=len(texto_referencias))
         else:
-            # Si no encuentra la sección, usar los últimos 4000 chars
             texto_referencias = texto[-4000:]
             logger.warning("seccion_referencias_no_encontrada_usando_final_del_documento")
 
         if not texto_referencias.strip():
             return []
 
-        bloques = self._dividir_texto(texto_referencias, max_chars=4000)
+        bloques = self._dividir_texto(texto_referencias, max_chars=8000)
         todas: list[ReferenciaAPA] = []
 
         for i, bloque in enumerate(bloques):
@@ -88,14 +85,24 @@ class EntidadExtractionService:
     def extraer_citas(self, texto: str, num_paginas: int) -> list[CitaEnTexto]:
         """
         Detecta citas APA en el cuerpo del texto (HU-005).
-        Usa regex primero para validar que hay citas antes de llamar a Gemini.
+        Excluye la sección de referencias para evitar falsos positivos.
         """
-        candidatos = self._detectar_citas_regex(texto)
+        # Excluir sección de referencias del texto a analizar
+        patron_refs = r'(?i)^(\*{1,2})?\s*#{0,3}\s*(referencias?\s*bibliogr[áa]ficas?|referencias?|bibliograf[íi]a|references?)\s*(\*{1,2})?\s*$'
+        match = re.search(patron_refs, texto, re.MULTILINE)
+
+        if match:
+            texto_cuerpo = texto[:match.start()]
+            logger.info("excluyendo_seccion_referencias", chars_excluidos=len(texto) - match.start())
+        else:
+            texto_cuerpo = texto
+
+        candidatos = self._detectar_citas_regex(texto_cuerpo)
         if not candidatos:
             logger.info("no_se_encontraron_citas_con_regex")
             return []
 
-        bloques = self._dividir_texto(texto, max_chars=4000)
+        bloques = self._dividir_texto(texto_cuerpo, max_chars=8000)
         todas: list[CitaEnTexto] = []
 
         for i, bloque in enumerate(bloques):
@@ -122,6 +129,7 @@ class EntidadExtractionService:
             except Exception as e:
                 logger.error("error_extraccion_citas", bloque=i, error=str(e))
 
+        logger.info("citas_detectadas_detalle", citas=[c.texto_cita for c in todas])
         logger.info("citas_extraidas", total=len(todas))
         return todas
 
@@ -131,13 +139,9 @@ class EntidadExtractionService:
         Solo acepta patrones con apellido(s) + año válido.
         """
         patrones = [
-            # (Apellido, 2020) o (Apellido y Apellido, 2020)
             r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+y\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?,\s*(?:19|20)\d{2}(?:,\s*p{1,2}\.\s*\d+(?:-\d+)?)?\)',
-            # (Apellido et al., 2020)
             r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s+et\s+al\.,\s*(?:19|20)\d{2}(?:,\s*p{1,2}\.\s*\d+(?:-\d+)?)?\)',
-            # (Apellido & Apellido, 2020) — versión en inglés
             r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+&\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?,\s*(?:19|20)\d{2}\)',
-            # Apellido (2020) — narrativa
             r'[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+et\s+al\.)?\s*\((?:19|20)\d{2}\)',
         ]
 
@@ -150,10 +154,6 @@ class EntidadExtractionService:
 
     @staticmethod
     def _dividir_texto(texto: str, max_chars: int) -> list[str]:
-        """
-        Divide texto en bloques respetando saltos de párrafo.
-        Evita cortar una referencia o cita a la mitad.
-        """
         if len(texto) <= max_chars:
             return [texto]
 
@@ -178,18 +178,15 @@ class EntidadExtractionService:
 
     @staticmethod
     def _parsear_json(texto: str) -> list[dict]:
-        """Parsea JSON line-by-line o array según lo que venga."""
         try:
             limpio = re.sub(r"```json\s*|\s*```", "", texto).strip()
-            
-            # Intentar array primero
+
             try:
                 resultado = json.loads(limpio)
                 return resultado if isinstance(resultado, list) else []
             except json.JSONDecodeError:
                 pass
 
-            # Intentar JSON line-by-line
             resultados = []
             for linea in limpio.split('\n'):
                 linea = linea.strip()
@@ -201,11 +198,10 @@ class EntidadExtractionService:
                         resultados.append(obj)
                 except json.JSONDecodeError:
                     continue
-            
+
             if resultados:
                 return resultados
 
-            # Último recurso: recuperar objetos completos del array truncado
             if limpio.startswith('['):
                 ultimo_corchete = limpio.rfind('},')
                 if ultimo_corchete > 0:
@@ -218,6 +214,7 @@ class EntidadExtractionService:
             return []
         except Exception:
             return []
+
 
 # Singleton
 extraccion_service = EntidadExtractionService()

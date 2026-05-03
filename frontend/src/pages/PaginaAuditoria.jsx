@@ -63,7 +63,14 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
       }
     }
 
-    eventSource.onerror = () => {
+    eventSource.onerror = (err) => {
+      console.error('SSE error:', err)
+      setProgreso(prev => ({
+        ...prev,
+        estado: 'error',
+        mensaje_progreso: 'Se perdió la conexión con el servidor.',
+        error: 'No se pudo mantener la conexión en tiempo real. Recarga la página.',
+      }))
       eventSource.close()
     }
 

@@ -2,9 +2,9 @@ import json
 import uuid
 from pathlib import Path
 import structlog
-import asyncio 
+import asyncio
 from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks
-from sse_starlette.sse import EventSourceResponse
+from fastapi.responses import StreamingResponse
 
 from app.core.config import get_settings
 from app.models.ingesta import (
@@ -139,48 +139,58 @@ async def ver_estructura(documento_id: str):
     summary="HU-003: Stream de progreso en tiempo real (SSE)",
 )
 async def ver_progreso(documento_id: str):
-    """
-    Server-Sent Events — el backend empuja el progreso al frontend
-    en tiempo real sin polling.
-    """
+    logger.info("sse_conectado", doc_id=documento_id)
+
     async def generador():
         ultimo_porcentaje = -1
         intentos_sin_cambio = 0
+        ticks = 0
 
         while True:
             progreso = _leer_progreso(documento_id)
 
             if not progreso:
-                # Aún no existe el archivo, esperar
                 await asyncio.sleep(0.5)
                 intentos_sin_cambio += 1
                 if intentos_sin_cambio > 20:
-                    yield {
-                        "data": json.dumps({
-                            "estado": "error",
-                            "porcentaje": 0,
-                            "mensaje_progreso": "No se encontró la auditoría.",
-                            "error": "Documento no encontrado."
-                        })
-                    }
-                    break
+                    payload = json.dumps({
+                        "documento_id": documento_id,
+                        "estado": "error",
+                        "porcentaje": 0,
+                        "mensaje_progreso": "No se encontró la auditoría.",
+                        "error": "Documento no encontrado.",
+                    })
+                    yield f"data: {payload}\n\n"
+                    return
+                # Keepalive para que el browser no cierre la conexión
+                yield ": keep-alive\n\n"
                 continue
 
-            # Solo enviar si cambió el porcentaje
             if progreso.porcentaje != ultimo_porcentaje:
                 ultimo_porcentaje = progreso.porcentaje
-                intentos_sin_cambio = 0
-                yield {"data": progreso.model_dump_json()}
+                ticks = 0
+                yield f"data: {progreso.model_dump_json()}\n\n"
 
-            # Terminar el stream cuando complete o falle
-            if progreso.estado in ("completado", "error"):
-                break
+            if progreso.estado in (EstadoIngesta.COMPLETADO, EstadoIngesta.ERROR):
+                logger.info("sse_finalizado", doc_id=documento_id, estado=progreso.estado)
+                return
 
             await asyncio.sleep(0.5)
+            ticks += 1
+            if ticks % 30 == 0:  # ping cada ~15 s para mantener conexión viva
+                yield ": keep-alive\n\n"
 
-    return EventSourceResponse(generador())
+    return StreamingResponse(
+        generador(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
-async def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
+def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
     from app.services.grafo.extraccion_service import extraccion_service
     from app.services.grafo.grafo_carga_service import grafo_carga_service
 

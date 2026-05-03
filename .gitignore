@@ -3,3 +3,4 @@
 Keys/
 backend/data/
 backend/data/chromadb/
+backend/data/uploads/*.md

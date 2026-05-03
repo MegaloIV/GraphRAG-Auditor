@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
 
+    # OpenAI
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+
     # CrossRef / Unpaywall
     crossref_email: str = "malcaldel1@upao.edu.pe"
 
