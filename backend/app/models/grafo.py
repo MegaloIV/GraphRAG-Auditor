@@ -34,8 +34,8 @@ class CitaEnTexto(BaseModel):
     cita_id: str
     texto_cita: str
     tipo: TipoCita
-    pagina: int
-    fragmento_oracion: str
+    pagina: int = 0     
+    fragmento_oracion: str = ""
     referencia_id: Optional[str] = None
 
 

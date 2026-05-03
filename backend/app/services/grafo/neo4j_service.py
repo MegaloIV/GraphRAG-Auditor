@@ -28,11 +28,17 @@ class Neo4jService:
 
     def __init__(self):
         self._driver: Driver | None = None
-
+        
     @property
     def driver(self) -> Driver:
         if self._driver is None:
             self._driver = self._conectar()
+        else:
+            try:
+                self._driver.verify_connectivity()
+            except Exception:
+                logger.warning("neo4j_reconectando")
+                self._driver = self._conectar()
         return self._driver
 
     def _conectar(self) -> Driver:

@@ -14,13 +14,18 @@ from app.models.ingesta import (
 logger = structlog.get_logger(__name__)
 settings = get_settings()
 
-# Patrones para detectar secciones por su título
 PATRONES_SECCIONES: dict[TipoSeccion, list[str]] = {
     TipoSeccion.REFERENCIAS: [
         r"^referencias?\s*$",
         r"^bibliograf[íi]a\s*$",
         r"^references?\s*$",
         r"^works?\s+cited\s*$",
+        r"^referencias?\s+bibliogr[áa]ficas?\s*$",
+        r"^lista\s+de\s+referencias?\s*$",
+        r"^fuentes?\s+bibliogr[áa]ficas?\s*$",
+        r"^fuentes?\s+de\s+consulta\s*$",
+        r"^\d+[\.\s]+referencias?\s*$",
+        r"^\d+[\.\s]+bibliograf[íi]a\s*$",
     ],
     TipoSeccion.INTRODUCCION: [
         r"^introducci[oó]n\s*$",
@@ -51,7 +56,6 @@ PATRONES_SECCIONES: dict[TipoSeccion, list[str]] = {
 
 
 class PDFNoProcessableError(Exception):
-    """Se lanza cuando el PDF no puede ser procesado."""
     def __init__(self, codigo: str, mensaje: str, accion: str):
         self.codigo = codigo
         self.mensaje = mensaje
@@ -62,10 +66,6 @@ class PDFNoProcessableError(Exception):
 class PDFExtractionService:
 
     def validar_pdf(self, contenido: bytes, nombre_archivo: str) -> None:
-        """
-        Valida el archivo antes de procesarlo.
-        HU-001 / RN-002: errores claros sin detalles técnicos internos.
-        """
         if not nombre_archivo.lower().endswith(".pdf"):
             raise PDFNoProcessableError(
                 codigo="FORMATO_INVALIDO",
@@ -90,19 +90,28 @@ class PDFExtractionService:
 
     def extraer_texto(self, ruta_pdf: Path) -> tuple[str, int]:
         """
-        Extrae texto del PDF como Markdown usando pymupdf4llm.
-        RN-001: debe completarse en menos de 30s para 50 páginas.
-        Retorna (texto_markdown, num_paginas).
+        Extrae texto del PDF como Markdown.
+        Cachea el resultado en disco para no re-procesar el mismo PDF.
         """
+        import fitz
+
+        # Siempre necesitamos el número de páginas
+        doc = fitz.open(str(ruta_pdf))
+        num_paginas = len(doc)
+        doc.close()
+
+        # Verificar cache
+        ruta_cache = ruta_pdf.with_suffix('.md')
+        if ruta_cache.exists():
+            logger.info("pdf_desde_cache", paginas=num_paginas, ruta=str(ruta_cache))
+            texto_md = ruta_cache.read_text(encoding='utf-8')
+            return texto_md, num_paginas
+
+        # Extraer con pymupdf4llm
         try:
             import pymupdf4llm
-            import fitz
 
             inicio = time.perf_counter()
-
-            doc = fitz.open(str(ruta_pdf))
-            num_paginas = len(doc)
-            doc.close()
 
             if num_paginas == 0:
                 raise PDFNoProcessableError(
@@ -126,6 +135,10 @@ class PDFExtractionService:
             if elapsed > 30:
                 logger.warning("extraccion_lenta", tiempo_segundos=round(elapsed, 2))
 
+            # Guardar cache en disco
+            ruta_cache.write_text(texto_md, encoding='utf-8')
+            logger.info("pdf_cache_guardado", ruta=str(ruta_cache))
+
             return texto_md, num_paginas
 
         except PDFNoProcessableError:
@@ -137,11 +150,12 @@ class PDFExtractionService:
                 accion="Verifica que el archivo no esté protegido con contraseña.",
             )
 
-    def detectar_secciones(self, texto_md: str, num_paginas: int, documento_id: str) -> EstructuraDocumentoResponse:
-        """
-        Analiza el Markdown y detecta las secciones del documento.
-        HU-002: advierte si no encuentra sección de referencias.
-        """
+    def detectar_secciones(
+        self,
+        texto_md: str,
+        num_paginas: int,
+        documento_id: str,
+    ) -> EstructuraDocumentoResponse:
         lineas = texto_md.split("\n")
         secciones: list[SeccionDetectada] = []
         seccion_actual: Optional[TipoSeccion] = None
@@ -168,7 +182,9 @@ class PDFExtractionService:
 
                     seccion_actual = tipo_detectado
                     titulo_actual = titulo_candidato
-                    pagina_inicio_actual = max(1, int((i / max(len(lineas), 1)) * num_paginas) + 1)
+                    pagina_inicio_actual = max(
+                        1, int((i / max(len(lineas), 1)) * num_paginas) + 1
+                    )
 
         if seccion_actual is not None:
             secciones.append(SeccionDetectada(

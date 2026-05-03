@@ -3,28 +3,21 @@ import re
 import uuid
 import structlog
 
-from app.services.llm.groq_client import llm_service
+from app.services.llm.openai_client import llm_service
 from app.models.grafo import ReferenciaAPA, CitaEnTexto, TipoCita
 
 logger = structlog.get_logger(__name__)
 
 SYSTEM_REFERENCIAS = """Eres un extractor de referencias bibliográficas APA 7ma edición.
-Analiza el texto y extrae cada referencia de forma estructurada.
-Responde ÚNICAMENTE con un JSON array. Sin texto adicional, sin markdown, sin explicaciones.
+Extrae CADA referencia como un objeto JSON separado, uno por línea.
+NO uses array. Cada línea debe ser un JSON válido independiente.
+Sin texto adicional, sin markdown.
+Si falta el año usa null. Si faltan autores usa [].
+Marca datos_incompletos como true si falta algún campo clave.
 
-Formato de cada objeto:
-{
-  "autores": ["Apellido, N."],
-  "anio": 2020,
-  "titulo": "Título del trabajo",
-  "fuente": "Nombre de la revista o editorial",
-  "doi": "10.xxxx/xxxxx o null",
-  "datos_incompletos": false,
-  "campos_faltantes": []
-}
+Formato de cada línea:
+{"autores": ["Apellido, N."], "anio": 2020, "titulo": "Título", "fuente": "Revista", "doi": "10.xxx o null", "datos_incompletos": false, "campos_faltantes": []}"""
 
-Si falta el año usa null. Si faltan autores usa []. 
-Marca datos_incompletos como true si falta algún campo clave."""
 
 SYSTEM_CITAS = """Eres un detector de citas APA 7ma edición en texto académico.
 Extrae TODAS las citas encontradas en el texto.
@@ -48,24 +41,20 @@ class EntidadExtractionService:
     def extraer_referencias(self, texto: str) -> list[ReferenciaAPA]:
         """
         Extrae SOLO la sección de referencias, no todo el documento.
-        Reduce las llamadas al LLM de 14 a 1 o 2 máximo.
         """
-        # Buscar donde empieza la sección de referencias
-        patron = r'(?i)^#{1,3}\s*(referencias?|bibliograf[íi]a|references?|works?\s+cited)\s*$'
+        patron = r'(?i)^(\*{1,2})?\s*#{0,3}\s*(referencias?\s*bibliogr[áa]ficas?|referencias?|bibliograf[íi]a|references?|works?\s+cited|fuentes?\s+bibliogr[áa]ficas?|fuentes?\s+de\s+consulta|\d+[\.\s]+referencias?|\d+[\.\s]+bibliograf[íi]a)\s*(\*{1,2})?\s*$'
         match = re.search(patron, texto, re.MULTILINE)
-
         if match:
             texto_referencias = texto[match.start():]
             logger.info("seccion_referencias_encontrada", chars=len(texto_referencias))
         else:
-            # Si no encuentra la sección, usar los últimos 4000 chars
             texto_referencias = texto[-4000:]
             logger.warning("seccion_referencias_no_encontrada_usando_final_del_documento")
 
         if not texto_referencias.strip():
             return []
 
-        bloques = self._dividir_texto(texto_referencias, max_chars=6000)
+        bloques = self._dividir_texto(texto_referencias, max_chars=8000)
         todas: list[ReferenciaAPA] = []
 
         for i, bloque in enumerate(bloques):
@@ -96,14 +85,24 @@ class EntidadExtractionService:
     def extraer_citas(self, texto: str, num_paginas: int) -> list[CitaEnTexto]:
         """
         Detecta citas APA en el cuerpo del texto (HU-005).
-        Usa regex primero para validar que hay citas antes de llamar a Gemini.
+        Excluye la sección de referencias para evitar falsos positivos.
         """
-        candidatos = self._detectar_citas_regex(texto)
+        # Excluir sección de referencias del texto a analizar
+        patron_refs = r'(?i)^(\*{1,2})?\s*#{0,3}\s*(referencias?\s*bibliogr[áa]ficas?|referencias?|bibliograf[íi]a|references?)\s*(\*{1,2})?\s*$'
+        match = re.search(patron_refs, texto, re.MULTILINE)
+
+        if match:
+            texto_cuerpo = texto[:match.start()]
+            logger.info("excluyendo_seccion_referencias", chars_excluidos=len(texto) - match.start())
+        else:
+            texto_cuerpo = texto
+
+        candidatos = self._detectar_citas_regex(texto_cuerpo)
         if not candidatos:
             logger.info("no_se_encontraron_citas_con_regex")
             return []
 
-        bloques = self._dividir_texto(texto, max_chars=4000)
+        bloques = self._dividir_texto(texto_cuerpo, max_chars=8000)
         todas: list[CitaEnTexto] = []
 
         for i, bloque in enumerate(bloques):
@@ -130,27 +129,31 @@ class EntidadExtractionService:
             except Exception as e:
                 logger.error("error_extraccion_citas", bloque=i, error=str(e))
 
+        logger.info("citas_detectadas_detalle", citas=[c.texto_cita for c in todas])
         logger.info("citas_extraidas", total=len(todas))
         return todas
 
     def _detectar_citas_regex(self, texto: str) -> list[str]:
         """
-        Detección rápida con regex antes de llamar al LLM.
-        Evita gastar tokens si el documento no tiene citas APA.
+        Detección estricta de citas APA reales.
+        Solo acepta patrones con apellido(s) + año válido.
         """
-        patron_parentetica = r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+et\s+al\.)?(?:\s*[,&]\s*[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?,\s*\d{4}\)'
-        patron_narrativa = r'[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+et\s+al\.)?\s*\(\d{4}\)'
+        patrones = [
+            r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+y\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?,\s*(?:19|20)\d{2}(?:,\s*p{1,2}\.\s*\d+(?:-\d+)?)?\)',
+            r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s+et\s+al\.,\s*(?:19|20)\d{2}(?:,\s*p{1,2}\.\s*\d+(?:-\d+)?)?\)',
+            r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+&\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?,\s*(?:19|20)\d{2}\)',
+            r'[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+et\s+al\.)?\s*\((?:19|20)\d{2}\)',
+        ]
 
-        encontradas = re.findall(patron_parentetica, texto)
-        encontradas += re.findall(patron_narrativa, texto)
-        return list(set(encontradas))
+        encontradas = set()
+        for patron in patrones:
+            matches = re.findall(patron, texto)
+            encontradas.update(matches)
+
+        return list(encontradas)
 
     @staticmethod
     def _dividir_texto(texto: str, max_chars: int) -> list[str]:
-        """
-        Divide texto en bloques respetando saltos de párrafo.
-        Evita cortar una referencia o cita a la mitad.
-        """
         if len(texto) <= max_chars:
             return [texto]
 
@@ -175,16 +178,41 @@ class EntidadExtractionService:
 
     @staticmethod
     def _parsear_json(texto: str) -> list[dict]:
-        """
-        Parsea la respuesta JSON de Gemini de forma segura.
-        Gemini a veces envuelve el JSON en bloques de markdown.
-        """
         try:
             limpio = re.sub(r"```json\s*|\s*```", "", texto).strip()
-            resultado = json.loads(limpio)
-            return resultado if isinstance(resultado, list) else []
-        except json.JSONDecodeError as e:
-            logger.warning("json_parse_error", error=str(e))
+
+            try:
+                resultado = json.loads(limpio)
+                return resultado if isinstance(resultado, list) else []
+            except json.JSONDecodeError:
+                pass
+
+            resultados = []
+            for linea in limpio.split('\n'):
+                linea = linea.strip()
+                if not linea or not linea.startswith('{'):
+                    continue
+                try:
+                    obj = json.loads(linea)
+                    if isinstance(obj, dict):
+                        resultados.append(obj)
+                except json.JSONDecodeError:
+                    continue
+
+            if resultados:
+                return resultados
+
+            if limpio.startswith('['):
+                ultimo_corchete = limpio.rfind('},')
+                if ultimo_corchete > 0:
+                    try:
+                        resultado = json.loads(limpio[:ultimo_corchete + 1] + ']')
+                        return resultado if isinstance(resultado, list) else []
+                    except json.JSONDecodeError:
+                        pass
+
+            return []
+        except Exception:
             return []
 
 
