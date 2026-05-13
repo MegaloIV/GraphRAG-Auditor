@@ -10,10 +10,7 @@ export default function ListaReferencias({ referencias, total, advertencia }) {
         justifyContent: 'space-between',
         marginBottom: '1rem',
       }}>
-        <span style={{
-          fontSize: '0.8rem',
-          color: 'var(--text-muted)',
-        }}>
+        <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
           {total} referencias detectadas
         </span>
         {advertencia && (
@@ -21,7 +18,7 @@ export default function ListaReferencias({ referencias, total, advertencia }) {
         )}
       </div>
 
-      {/* Advertencia */}
+      {/* Advertencia general */}
       {advertencia && (
         <div style={{
           padding: '0.75rem 1rem',
@@ -44,7 +41,6 @@ export default function ListaReferencias({ referencias, total, advertencia }) {
         display: 'flex',
         flexDirection: 'column',
         gap: '0.5rem',
-        maxHeight: '420px',
         overflowY: 'auto',
         paddingRight: '0.25rem',
       }}>
@@ -116,12 +112,6 @@ export default function ListaReferencias({ referencias, total, advertencia }) {
                   DOI: {ref.doi}
                 </span>
               )}
-              {ref.datos_incompletos && (
-                <Badge
-                  texto={`Faltan: ${ref.campos_faltantes.join(', ')}`}
-                  variante="warning"
-                />
-              )}
               {ref.nivel_confianza && (
                 <Badge
                   texto={ref.nivel_confianza === 'texto_completo'
@@ -138,6 +128,57 @@ export default function ListaReferencias({ referencias, total, advertencia }) {
                 />
               )}
             </div>
+
+            {/* Campos faltantes */}
+            {ref.datos_incompletos && (
+              (() => {
+                const faltantes = ref.campos_faltantes?.length > 0
+                  ? ref.campos_faltantes
+                  : [
+                      !ref.autores?.length && 'autores',
+                      !ref.anio && 'año',
+                      !ref.titulo && 'título',
+                      !ref.fuente && 'fuente/revista',
+                      !ref.doi && 'DOI',
+                    ].filter(Boolean)
+
+                return faltantes.length > 0 ? (
+                  <div style={{
+                    marginTop: '0.5rem',
+                    padding: '0.5rem 0.75rem',
+                    background: 'var(--warning-subtle)',
+                    border: '1px solid rgba(245,158,11,0.2)',
+                    borderRadius: 'var(--radius-sm)',
+                    fontSize: '0.75rem',
+                    color: 'var(--warning)',
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '0.4rem',
+                  }}>
+                    <span>⚠️</span>
+                    <div>
+                      <span style={{ fontWeight: 600 }}>Faltan: </span>
+                      {faltantes.join(', ')}
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{
+                    marginTop: '0.5rem',
+                    padding: '0.5rem 0.75rem',
+                    background: 'var(--warning-subtle)',
+                    border: '1px solid rgba(245,158,11,0.2)',
+                    borderRadius: 'var(--radius-sm)',
+                    fontSize: '0.75rem',
+                    color: 'var(--warning)',
+                    display: 'flex',
+                    gap: '0.4rem',
+                  }}>
+                    <span>⚠️</span>
+                    <span>Referencia marcada como incompleta por el analizador.</span>
+                  </div>
+                )
+              })()
+            )}
           </div>
         ))}
       </div>

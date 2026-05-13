@@ -7,7 +7,6 @@ from app.core.config import get_settings
 logger = structlog.get_logger(__name__)
 settings = get_settings()
 
-# Constraints: garantizan unicidad de nodos
 CONSTRAINTS = [
     "CREATE CONSTRAINT doc_id IF NOT EXISTS FOR (d:Documento) REQUIRE d.id IS UNIQUE",
     "CREATE CONSTRAINT ref_id IF NOT EXISTS FOR (r:Referencia) REQUIRE r.id IS UNIQUE",
@@ -15,7 +14,6 @@ CONSTRAINTS = [
     "CREATE CONSTRAINT autor_nombre IF NOT EXISTS FOR (a:Autor) REQUIRE a.nombre_normalizado IS UNIQUE",
 ]
 
-# Índices: aceleran las búsquedas en el grafo (TA-001)
 INDICES = [
     "CREATE INDEX autor_nombre_idx IF NOT EXISTS FOR (a:Autor) ON (a.nombre)",
     "CREATE INDEX ref_titulo_idx IF NOT EXISTS FOR (r:Referencia) ON (r.titulo)",
@@ -28,7 +26,7 @@ class Neo4jService:
 
     def __init__(self):
         self._driver: Driver | None = None
-        
+
     @property
     def driver(self) -> Driver:
         if self._driver is None:
@@ -67,10 +65,6 @@ class Neo4jService:
             )
 
     def inicializar_schema(self) -> None:
-        """
-        Crea constraints e índices si no existen.
-        Es idempotente: se puede llamar múltiples veces sin problema.
-        """
         with self.driver.session(database=settings.neo4j_database) as session:
             for query in CONSTRAINTS:
                 session.run(query)
@@ -80,8 +74,8 @@ class Neo4jService:
 
     def contar_nodos_y_relaciones(self, documento_id: str) -> dict:
         """
-        Cuenta nodos y relaciones del grafo para un documento.
-        Usado para el resumen de HU-006.
+        Cuenta nodos y relaciones reales del grafo para un documento.
+        Incluye CITA_A para densidad correcta.
         """
         query = """
         MATCH (d:Documento {id: $doc_id})
@@ -93,21 +87,31 @@ class Neo4jService:
             count(DISTINCT c) AS citas,
             count(DISTINCT a) AS autores
         """
+        query_cita_a = """
+        MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)-[:CITA_A]->()
+        RETURN count(c) AS citas_vinculadas
+        """
         with self.driver.session(database=settings.neo4j_database) as session:
-            result = session.run(query, doc_id=documento_id).single()
-            if not result:
-                return {"referencias": 0, "citas": 0, "autores": 0, "relaciones": 0}
+            result       = session.run(query, doc_id=documento_id).single()
+            cita_a_res   = session.run(query_cita_a, doc_id=documento_id).single()
 
-            referencias = result["referencias"]
-            citas = result["citas"]
-            autores = result["autores"]
-            relaciones = referencias + citas + autores + min(citas, referencias)
+            if not result:
+                return {"referencias": 0, "citas": 0, "autores": 0, "relaciones": 0, "citas_vinculadas": 0}
+
+            referencias      = result["referencias"]
+            citas            = result["citas"]
+            autores          = result["autores"]
+            citas_vinculadas = cita_a_res["citas_vinculadas"] if cita_a_res else 0
+
+            # Relaciones reales: TIENE_REFERENCIA + TIENE_CITA + ESCRITO_POR + CITA_A
+            relaciones = referencias + citas + autores + citas_vinculadas
 
             return {
                 "referencias": referencias,
                 "citas": citas,
                 "autores": autores,
                 "relaciones": relaciones,
+                "citas_vinculadas": citas_vinculadas,
             }
 
     def cerrar(self) -> None:

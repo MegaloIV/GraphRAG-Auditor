@@ -161,7 +161,7 @@ class VerificacionService:
             r.verificado_en = datetime()
         """
         try:
-            with neo4j_service.driver.session() as session:
+            with neo4j_service.driver.session(database=settings.neo4j_database) as session:
                 session.run(
                     query,
                     ref_id=referencia_id,

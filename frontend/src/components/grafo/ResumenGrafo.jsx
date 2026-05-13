@@ -9,6 +9,7 @@ export default function ResumenGrafo({ datos }) {
     total_relaciones,
     densidad_promedio,
     grafo_robusto,
+    citas_vinculadas,
     advertencia_densidad,
     error,
   } = datos
@@ -37,12 +38,8 @@ export default function ResumenGrafo({ datos }) {
         alignItems: 'center',
         gap: '0.75rem',
         padding: '1rem',
-        background: grafo_robusto
-          ? 'var(--success-subtle)'
-          : 'var(--warning-subtle)',
-        border: `1px solid ${grafo_robusto
-          ? 'rgba(16, 185, 129, 0.2)'
-          : 'rgba(245, 158, 11, 0.2)'}`,
+        background: grafo_robusto ? 'var(--success-subtle)' : 'var(--warning-subtle)',
+        border: `1px solid ${grafo_robusto ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)'}`,
         borderRadius: 'var(--radius-md)',
         marginBottom: '1.25rem',
       }}>
@@ -96,56 +93,13 @@ export default function ResumenGrafo({ datos }) {
         gap: '0.75rem',
         marginBottom: '1.25rem',
       }}>
-        <MetricaGrafo
-          icono="⬡"
-          label="Total nodos"
-          valor={total_nodos}
-        />
-        <MetricaGrafo
-          icono="↔"
-          label="Total relaciones"
-          valor={total_relaciones}
-        />
-        <MetricaGrafo
-          icono="👤"
-          label="Autores"
-          valor={nodos_autores}
-        />
-        <MetricaGrafo
-          icono="📚"
-          label="Referencias"
-          valor={nodos_referencias}
-        />
-        <MetricaGrafo
-          icono="💬"
-          label="Citas"
-          valor={nodos_citas}
-        />
-        <MetricaGrafo
-          icono="~"
-          label="Densidad"
-          valor={`${densidad_promedio} r/n`}
-          mono
-        />
-      </div>
-
-      {/* Nota sobre EP-003 */}
-      <div style={{
-        padding: '0.75rem 1rem',
-        background: 'var(--accent-subtle)',
-        border: '1px solid rgba(59, 130, 246, 0.2)',
-        borderRadius: 'var(--radius-md)',
-        fontSize: '0.8rem',
-        color: 'var(--text-secondary)',
-        display: 'flex',
-        gap: '0.5rem',
-        alignItems: 'flex-start',
-      }}>
-        <span style={{ color: 'var(--accent)' }}>ℹ</span>
-        <span>
-          El grafo está listo para la auditoría semántica.
-          La validación cruzada de citas estará disponible en la próxima fase.
-        </span>
+        <MetricaGrafo icono="⬡"  label="Total nodos"      valor={total_nodos} />
+        <MetricaGrafo icono="↔"  label="Total relaciones"  valor={total_relaciones} />
+        <MetricaGrafo icono="👤" label="Autores"            valor={nodos_autores} />
+        <MetricaGrafo icono="📚" label="Referencias"        valor={nodos_referencias} />
+        <MetricaGrafo icono="💬" label="Citas"              valor={nodos_citas} />
+        <MetricaGrafo icono="🔗" label="Citas vinculadas"   valor={citas_vinculadas ?? 0} />
+        <MetricaGrafo icono="~"  label="Densidad"           valor={`${densidad_promedio} r/n`} mono />
       </div>
     </div>
   )
