@@ -106,6 +106,7 @@ async def ver_veredictos(documento_id: str):
     RETURN
       c.id            AS cita_id,
       c.texto         AS texto_cita,
+      c.fragmento     AS fragmento_oracion,
       c.pagina        AS pagina,
       c.veredicto     AS veredicto,
       c.justificacion AS justificacion,
@@ -140,6 +141,7 @@ async def ver_veredictos(documento_id: str):
             veredictos.append(VeredictoAuditoria(
                 cita_id=r["cita_id"],
                 texto_cita=r["texto_cita"] or "",
+                fragmento_oracion=r["fragmento_oracion"] or "",
                 pagina=r["pagina"] or 0,
                 veredicto=tipo,
                 justificacion=r["justificacion"] or "",

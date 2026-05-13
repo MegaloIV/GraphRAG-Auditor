@@ -59,5 +59,6 @@ class ResumenGrafo(BaseModel):
     total_relaciones: int
     densidad_promedio: float
     grafo_robusto: bool
+    citas_vinculadas: int = 0      
     advertencia_densidad: Optional[str] = None
     error: Optional[str] = None

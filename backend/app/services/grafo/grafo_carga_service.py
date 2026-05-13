@@ -250,16 +250,12 @@ class GrafoCargaService:
         return {"vinculadas": vinculadas, "no_vinculadas": no_vinculadas, "total": total}
 
     def obtener_resumen_grafo(self, documento_id: str) -> ResumenGrafo:
-        """
-        Genera el resumen del grafo para HU-006.
-        Calcula densidad y determina si es robusto (> 3 rel/nodo).
-        """
         conteo = neo4j_service.contar_nodos_y_relaciones(documento_id)
 
-        total_nodos = conteo["referencias"] + conteo["citas"] + conteo["autores"]
+        total_nodos      = conteo["referencias"] + conteo["citas"] + conteo["autores"]
         total_relaciones = conteo["relaciones"]
-        densidad = round(total_relaciones / max(total_nodos, 1), 2)
-        grafo_robusto = densidad >= 3.0
+        densidad         = round(total_relaciones / max(total_nodos, 1), 2)
+        grafo_robusto    = densidad >= 3.0
 
         advertencia = None
         if not grafo_robusto:
@@ -278,6 +274,7 @@ class GrafoCargaService:
             total_relaciones=total_relaciones,
             densidad_promedio=densidad,
             grafo_robusto=grafo_robusto,
+            citas_vinculadas=conteo.get("citas_vinculadas", 0),
             advertencia_densidad=advertencia,
         )
 
