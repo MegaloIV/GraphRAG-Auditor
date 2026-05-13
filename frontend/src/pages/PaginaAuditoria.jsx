@@ -5,17 +5,26 @@ import ProgresoAuditoria from '../components/ingesta/ProgresoAuditoria'
 import ListaReferencias from '../components/grafo/ListaReferencias'
 import ListaCitas from '../components/grafo/ListaCitas'
 import ResumenGrafo from '../components/grafo/ResumenGrafo'
-import { grafoAPI } from '../api/client'
+import EstadoMotor from '../components/recuperacion/EstadoMotor'
+import ListaVeredictos from '../components/auditoria/ListaVeredictos'
+import AlertasInconsistencias from '../components/auditoria/AlertasInconsistencias'
+import AlertasAlucinaciones from '../components/auditoria/AlertasAlucinaciones'
+import { grafoAPI, recuperacionAPI, auditoriaAPI } from '../api/client'
 
 const TABS = [
-  { id: 'progreso',    label: 'Progreso',    icono: '⏳' },
-  { id: 'referencias', label: 'Referencias', icono: '📚' },
-  { id: 'citas',       label: 'Citas',       icono: '💬' },
-  { id: 'grafo',       label: 'Grafo',       icono: '⬡'  },
+  { id: 'progreso',      label: 'Progreso',    icono: '⏳' },
+  { id: 'referencias',   label: 'Referencias', icono: '📚' },
+  { id: 'citas',         label: 'Citas',       icono: '💬' },
+  { id: 'grafo',         label: 'Grafo',       icono: '⬡'  },
+  { id: 'motor',         label: 'Motor',       icono: '🔍' },
+  { id: 'veredictos',    label: 'Veredictos',  icono: '✓'  },
+  { id: 'alertas',       label: 'Alertas',     icono: '⚠️' },
 ]
 
 export default function PaginaAuditoria({ documentoId, onVolver }) {
   const [tabActiva, setTabActiva] = useState('progreso')
+
+  // ── Estado pipeline ──────────────────────────────────────
   const [progreso, setProgreso] = useState({
     documento_id: documentoId,
     estado: 'procesando',
@@ -24,23 +33,52 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
     citas_encontradas: null,
     error: null,
   })
-  const [referencias, setReferencias] = useState(null)
-  const [citas, setCitas] = useState(null)
+
+  // ── Datos grafo ──────────────────────────────────────────
+  const [referencias, setReferencias]   = useState(null)
+  const [citas, setCitas]               = useState(null)
   const [resumenGrafo, setResumenGrafo] = useState(null)
 
+  // ── EP-003: motor ────────────────────────────────────────
+  const [estadoMotor, setEstadoMotor] = useState(null)
+
+  // ── EP-004: auditoría ────────────────────────────────────
+  const [auditando, setAuditando]           = useState(false)
+  const [auditoriaData, setAuditoriaData]   = useState(null)
+  const [alertas, setAlertas]               = useState(null)
+  const [alertasAlucinacion, setAlertasAlucinacion] = useState(null)
+  const [errorAuditoria, setErrorAuditoria] = useState(null)
+
+  // ── SSE + carga inicial ──────────────────────────────────
   useEffect(() => {
     const cargarResultados = async () => {
       try {
-        const [refRes, citasRes, grafoRes] = await Promise.all([
+        const [refRes, citasRes, grafoRes, motorRes] = await Promise.all([
           grafoAPI.verReferencias(documentoId),
           grafoAPI.verCitas(documentoId),
           grafoAPI.verResumen(documentoId),
+          recuperacionAPI.estadoMotor(documentoId),
         ])
         setReferencias(refRes.data)
         setCitas(citasRes.data)
         setResumenGrafo(grafoRes.data)
+        setEstadoMotor(motorRes.data)
       } catch (err) {
-        console.error(err)
+        console.error('Error cargando resultados:', err)
+      }
+
+      // Si ya hay veredictos calculados, cargarlos
+      try {
+        const [verRes, alertasRes, alucinRes] = await Promise.all([
+          auditoriaAPI.verVeredictos(documentoId),
+          auditoriaAPI.verAlertas(documentoId),
+          auditoriaAPI.verAlertasAlucinaciones(documentoId),
+        ])
+        setAuditoriaData(verRes.data)
+        setAlertas(alertasRes.data)
+        setAlertasAlucinacion(alucinRes.data)
+      } catch {
+        // No hay veredictos aún — es normal
       }
     }
 
@@ -51,7 +89,6 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
       try {
         const datos = JSON.parse(event.data)
         setProgreso(datos)
-
         if (datos.estado === 'completado') {
           eventSource.close()
           cargarResultados()
@@ -63,39 +100,60 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
       }
     }
 
-    eventSource.onerror = (err) => {
-      console.error('SSE error:', err)
+    eventSource.onerror = () => {
       setProgreso(prev => ({
         ...prev,
         estado: 'error',
         mensaje_progreso: 'Se perdió la conexión con el servidor.',
-        error: 'No se pudo mantener la conexión en tiempo real. Recarga la página.',
+        error: 'No se pudo mantener la conexión en tiempo real.',
       }))
       eventSource.close()
     }
 
-    return () => {
-      eventSource.close()
-    }
+    return () => eventSource.close()
   }, [documentoId])
 
-  const auditoriaDone = progreso.estado === 'completado'
+  // ── Iniciar auditoría semántica ──────────────────────────
+  const iniciarAuditoria = async () => {
+    setAuditando(true)
+    setErrorAuditoria(null)
+    try {
+      const res = await auditoriaAPI.auditar(documentoId)
+      setAuditoriaData(res.data)
+
+      const [alertasRes, alucinRes] = await Promise.all([
+        auditoriaAPI.verAlertas(documentoId),
+        auditoriaAPI.verAlertasAlucinaciones(documentoId),
+      ])
+      setAlertas(alertasRes.data)
+      setAlertasAlucinacion(alucinRes.data)
+      setTabActiva('veredictos')
+    } catch (err) {
+      setErrorAuditoria(err.mensaje || 'Error al auditar el documento.')
+    } finally {
+      setAuditando(false)
+    }
+  }
+
+  const pipelineDone  = progreso.estado === 'completado'
+  const auditoriaDone = !!auditoriaData
+
+  // Tabs deshabilitadas según estado
+  const tabDeshabilitada = (tabId) => {
+    if (tabId === 'progreso') return false
+    if (!pipelineDone) return true
+    if (['veredictos', 'alertas'].includes(tabId) && !auditoriaDone) return true
+    return false
+  }
 
   return (
     <div style={{ minHeight: '100vh', background: 'var(--bg-base)' }}>
       <Navbar mostrarVolver onVolver={onVolver} />
 
-      <div style={{
-        maxWidth: '900px',
-        margin: '0 auto',
-        padding: '2rem 1.5rem',
-      }}>
+      <div style={{ maxWidth: '900px', margin: '0 auto', padding: '2rem 1.5rem' }}>
 
         {/* Header */}
-        <div style={{
-          marginBottom: '1.5rem',
-          animation: 'fadeIn 0.3s ease forwards',
-        }}>
+        <div style={{ marginBottom: '1.5rem', animation: 'fadeIn 0.3s ease forwards' }}>
           <h2 style={{
             fontSize: '1.4rem',
             fontWeight: 700,
@@ -123,9 +181,10 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
           borderRadius: 'var(--radius-md)',
           border: '1px solid var(--border)',
           width: 'fit-content',
+          flexWrap: 'wrap',
         }}>
           {TABS.map(tab => {
-            const deshabilitada = !auditoriaDone && tab.id !== 'progreso'
+            const deshabilitada = tabDeshabilitada(tab.id)
             return (
               <button
                 key={tab.id}
@@ -134,9 +193,7 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
                   padding: '0.5rem 1rem',
                   borderRadius: 'var(--radius-sm)',
                   border: 'none',
-                  background: tabActiva === tab.id
-                    ? 'var(--accent)'
-                    : 'transparent',
+                  background: tabActiva === tab.id ? 'var(--accent)' : 'transparent',
                   color: tabActiva === tab.id
                     ? 'white'
                     : deshabilitada
@@ -159,13 +216,10 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
           })}
         </div>
 
-        {/* Contenido de tabs */}
+        {/* ── Contenido tabs ── */}
+
         {tabActiva === 'progreso' && (
-          <Card
-            titulo="Estado del pipeline"
-            subtitulo="Actualizando en tiempo real"
-            icono="⏳"
-          >
+          <Card titulo="Estado del pipeline" subtitulo="Actualizando en tiempo real" icono="⏳">
             <ProgresoAuditoria progreso={progreso} />
           </Card>
         )}
@@ -201,36 +255,108 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
         )}
 
         {tabActiva === 'grafo' && resumenGrafo && (
-          <Card
-            titulo="Grafo de conocimiento"
-            subtitulo="Estadísticas de Neo4j"
-            icono="⬡"
-          >
+          <Card titulo="Grafo de conocimiento" subtitulo="Estadísticas de Neo4j" icono="⬡">
             <ResumenGrafo datos={resumenGrafo} />
           </Card>
         )}
 
-        {/* Cargando resultados */}
-        {auditoriaDone && tabActiva !== 'progreso' &&
-          !referencias && !citas && !resumenGrafo && (
-          <div style={{
-            textAlign: 'center',
-            padding: '3rem',
-            color: 'var(--text-muted)',
-          }}>
-            <div style={{
-              width: '32px',
-              height: '32px',
-              border: '3px solid var(--border)',
-              borderTop: '3px solid var(--accent)',
-              borderRadius: '50%',
-              margin: '0 auto 1rem',
-              animation: 'spin 1s linear infinite',
-            }} />
-            Cargando resultados...
+        {tabActiva === 'motor' && (
+          <Card
+            titulo="Motor de búsqueda semántica"
+            subtitulo="HU-007: preparación del motor GraphRAG"
+            icono="🔍"
+          >
+            {estadoMotor ? (
+              <>
+                <EstadoMotor
+                  datos={estadoMotor}
+                  onAuditar={iniciarAuditoria}
+                  auditando={auditando}
+                />
+                {errorAuditoria && (
+                  <div style={{
+                    marginTop: '1rem',
+                    padding: '0.875rem',
+                    background: 'var(--error-subtle)',
+                    border: '1px solid rgba(239,68,68,0.2)',
+                    borderRadius: 'var(--radius-md)',
+                    fontSize: '0.83rem',
+                    color: 'var(--error)',
+                  }}>
+                    ✕ {errorAuditoria}
+                  </div>
+                )}
+              </>
+            ) : (
+              <Spinner />
+            )}
+          </Card>
+        )}
+
+        {tabActiva === 'veredictos' && auditoriaData && (
+          <Card
+            titulo="Veredictos de auditoría"
+            subtitulo={`${auditoriaData.total_citas} citas auditadas`}
+            icono="✓"
+          >
+            <ListaVeredictos
+              veredictos={auditoriaData.veredictos}
+              total={auditoriaData.total_citas}
+              validas={auditoriaData.validas}
+              dudosas={auditoriaData.dudosas}
+              alucinadas={auditoriaData.alucinadas}
+              no_verificables={auditoriaData.no_verificables}
+              advertencia={auditoriaData.advertencia}
+            />
+          </Card>
+        )}
+
+        {tabActiva === 'alertas' && alertas && (
+          <>
+            <Card
+              titulo="Inconsistencias estructurales"
+              subtitulo="Citas sin referencia y referencias sin citar"
+              icono="⚠️"
+              style={{ marginBottom: '1rem' }}
+            >
+              <AlertasInconsistencias datos={alertas} />
+            </Card>
+
+            {alertasAlucinacion && (
+              <Card
+                titulo="Alertas de verificación"
+                subtitulo="Citas que el sistema no pudo verificar"
+                icono="🔴"
+              >
+                <AlertasAlucinaciones datos={alertasAlucinacion} />
+              </Card>
+            )}
+          </>
+        )}
+
+        {/* Spinner genérico para tabs cargando */}
+        {pipelineDone && tabActiva !== 'progreso' &&
+          !referencias && !citas && !resumenGrafo && tabActiva !== 'motor' && (
+          <div style={{ textAlign: 'center', padding: '3rem', color: 'var(--text-muted)' }}>
+            <Spinner />
+            <div style={{ marginTop: '1rem', fontSize: '0.85rem' }}>Cargando resultados...</div>
           </div>
         )}
       </div>
     </div>
   )
-} 
+}
+
+function Spinner() {
+  return (
+    <div style={{
+      width: '32px',
+      height: '32px',
+      border: '3px solid var(--border)',
+      borderTop: '3px solid var(--accent)',
+      borderRadius: '50%',
+      margin: '2rem auto',
+      animation: 'spin 1s linear infinite',
+    }} />
+  )
+}

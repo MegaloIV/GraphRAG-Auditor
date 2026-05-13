@@ -4,9 +4,10 @@ const ETAPAS = [
   { porcentaje: 10,  label: 'Extrayendo texto del PDF' },
   { porcentaje: 25,  label: 'Analizando estructura' },
   { porcentaje: 40,  label: 'Extrayendo referencias' },
-  { porcentaje: 60,  label: 'Detectando citas' },
-  { porcentaje: 75,  label: 'Construyendo grafo' },
-  { porcentaje: 80,  label: 'Verificando en CrossRef' },
+  { porcentaje: 55,  label: 'Detectando citas' },
+  { porcentaje: 70,  label: 'Construyendo grafo' },
+  { porcentaje: 78,  label: 'Vinculando citas con referencias' },
+  { porcentaje: 85,  label: 'Verificando en CrossRef' },
   { porcentaje: 100, label: 'Completado' },
 ]
 
@@ -50,7 +51,6 @@ export default function ProgresoAuditoria({ progreso }) {
                 transition: 'background 0.3s ease',
               }}
             >
-              {/* Indicador */}
               <div style={{
                 width: '20px',
                 height: '20px',
@@ -65,9 +65,7 @@ export default function ProgresoAuditoria({ progreso }) {
                   : activa
                   ? 'var(--accent)'
                   : 'var(--bg-surface-2)',
-                border: activa
-                  ? '2px solid var(--accent)'
-                  : 'none',
+                border: activa ? '2px solid var(--accent)' : 'none',
               }}>
                 {completada ? '✓' : activa ? (
                   <div style={{
@@ -81,7 +79,6 @@ export default function ProgresoAuditoria({ progreso }) {
                 ) : null}
               </div>
 
-              {/* Label */}
               <span style={{
                 fontSize: '0.82rem',
                 color: completada
@@ -94,7 +91,6 @@ export default function ProgresoAuditoria({ progreso }) {
                 {etapa.label}
               </span>
 
-              {/* Porcentaje */}
               <span style={{
                 marginLeft: 'auto',
                 fontSize: '0.72rem',
@@ -108,7 +104,7 @@ export default function ProgresoAuditoria({ progreso }) {
         })}
       </div>
 
-      {/* Resultado final */}
+      {/* Completado */}
       {estado === 'completado' && (
         <div style={{
           padding: '1rem',
@@ -122,20 +118,12 @@ export default function ProgresoAuditoria({ progreso }) {
         }}>
           <span style={{ fontSize: '1.5rem' }}>✅</span>
           <div>
-            <div style={{
-              fontSize: '0.9rem',
-              fontWeight: 600,
-              color: 'var(--success)',
-            }}>
-              Auditoría completada
+            <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--success)' }}>
+              Pipeline completado
             </div>
             {citas_encontradas !== null && (
-              <div style={{
-                fontSize: '0.8rem',
-                color: 'var(--text-secondary)',
-                marginTop: '2px',
-              }}>
-                {citas_encontradas} citas procesadas
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                {citas_encontradas} citas procesadas — listo para auditar
               </div>
             )}
           </div>
