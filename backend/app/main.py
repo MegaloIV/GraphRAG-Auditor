@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.logging import setup_logging, get_logger
-from app.api.routes import ingesta, grafo
+from app.api.routes import ingesta, grafo, recuperacion, auditoria
 
 settings = get_settings()
 setup_logging()
@@ -71,6 +71,8 @@ app.add_middleware(
 # Registrar los routers
 app.include_router(ingesta.router, prefix="/api/v1")
 app.include_router(grafo.router, prefix="/api/v1")
+app.include_router(recuperacion.router, prefix="/api/v1")
+app.include_router(auditoria.router, prefix="/api/v1")
 
 
 @app.get("/", tags=["Health"])

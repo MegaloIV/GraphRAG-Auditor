@@ -24,16 +24,36 @@ Extrae TODAS las citas encontradas en el texto.
 Responde ÚNICAMENTE con un JSON array. Sin texto adicional.
 
 Tipos de cita APA:
-- Parentética: (Apellido, año) o (Apellido & Apellido, año)
+- Parentética: (Apellido, año) o (Apellido & Apellido, año) o (Apellido et al., año)
 - Narrativa: Apellido (año)
 
-Formato de cada objeto:
+Para fragmento_oracion debes extraer el párrafo completo donde aparece la cita.
+
+Ejemplo de texto:
+"Los modelos de lenguaje han revolucionado el NLP. Estudios recientes demuestran que pueden generar texto coherente. Sin embargo, presentan problemas de alucinación factual donde inventan datos que no existen (Brown et al., 2020). Esto representa un riesgo crítico en aplicaciones médicas."
+
+Ejemplo de resultado correcto:
 {
-  "texto_cita": "(García, 2020)",
+  "texto_cita": "(Brown et al., 2020)",
   "tipo": "parentetica",
   "pagina": 5,
-  "fragmento_oracion": "texto de contexto donde aparece la cita"
-}"""
+  "fragmento_oracion": "Los modelos de lenguaje han revolucionado el NLP. Estudios recientes demuestran que pueden generar texto coherente. Sin embargo, presentan problemas de alucinación factual donde inventan datos que no existen (Brown et al., 2020). Esto representa un riesgo crítico en aplicaciones médicas."
+}
+
+Ejemplo de resultado INCORRECTO (no hagas esto):
+{
+  "texto_cita": "(Brown et al., 2020)",
+  "tipo": "parentetica",
+  "pagina": 5,
+  "fragmento_oracion": "(Brown et al., 2020)"
+}
+
+Reglas estrictas:
+- fragmento_oracion DEBE ser el párrafo completo que contiene la cita, no solo la cita
+- NUNCA pongas en fragmento_oracion solo el texto_cita — eso es incorrecto
+- Si el párrafo supera 800 caracteres, incluye al menos las 2 oraciones antes y 2 después de la cita
+- Si no encuentras el párrafo, copia las 3 oraciones más cercanas a la cita
+- NUNCA dejes fragmento_oracion vacío o igual a texto_cita"""
 
 
 class EntidadExtractionService:
@@ -87,7 +107,6 @@ class EntidadExtractionService:
         Detecta citas APA en el cuerpo del texto (HU-005).
         Excluye la sección de referencias para evitar falsos positivos.
         """
-        # Excluir sección de referencias del texto a analizar
         patron_refs = r'(?i)^(\*{1,2})?\s*#{0,3}\s*(referencias?\s*bibliogr[áa]ficas?|referencias?|bibliograf[íi]a|references?)\s*(\*{1,2})?\s*$'
         match = re.search(patron_refs, texto, re.MULTILINE)
 
@@ -114,6 +133,17 @@ class EntidadExtractionService:
                 )
                 citas_raw = self._parsear_json(respuesta)
                 for cita in citas_raw:
+                    fragmento = cita.get("fragmento_oracion", "")
+                    texto_cita = cita.get("texto_cita", "")
+
+                    # Si el LLM devuelve el fragmento igual a la cita, lo descartamos
+                    if fragmento.strip() == texto_cita.strip():
+                        fragmento = ""
+                        logger.warning(
+                            "fragmento_oracion_igual_a_cita",
+                            cita=texto_cita,
+                        )
+
                     tipo = (
                         TipoCita.PARENTETICA
                         if cita.get("tipo") == "parentetica"
@@ -121,23 +151,20 @@ class EntidadExtractionService:
                     )
                     todas.append(CitaEnTexto(
                         cita_id=str(uuid.uuid4()),
-                        texto_cita=cita.get("texto_cita", ""),
+                        texto_cita=texto_cita,
                         tipo=tipo,
                         pagina=cita.get("pagina", pagina_estimada),
-                        fragmento_oracion=cita.get("fragmento_oracion", "")[:200],
+                        fragmento_oracion=fragmento[:800],
                     ))
             except Exception as e:
                 logger.error("error_extraccion_citas", bloque=i, error=str(e))
 
         logger.info("citas_detectadas_detalle", citas=[c.texto_cita for c in todas])
+        logger.info("fragmentos_extraidos", fragmentos=[c.fragmento_oracion[:50] if c.fragmento_oracion else "VACÍO" for c in todas])
         logger.info("citas_extraidas", total=len(todas))
         return todas
 
     def _detectar_citas_regex(self, texto: str) -> list[str]:
-        """
-        Detección estricta de citas APA reales.
-        Solo acepta patrones con apellido(s) + año válido.
-        """
         patrones = [
             r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+y\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?,\s*(?:19|20)\d{2}(?:,\s*p{1,2}\.\s*\d+(?:-\d+)?)?\)',
             r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s+et\s+al\.,\s*(?:19|20)\d{2}(?:,\s*p{1,2}\.\s*\d+(?:-\d+)?)?\)',

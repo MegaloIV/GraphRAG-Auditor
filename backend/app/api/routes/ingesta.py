@@ -1,9 +1,10 @@
 import json
 import uuid
+import threading
 from pathlib import Path
 import structlog
 import asyncio
-from fastapi import APIRouter, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import APIRouter, File, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.core.config import get_settings
@@ -33,8 +34,14 @@ def _leer_progreso(documento_id: str) -> ProgresoAuditoriaResponse | None:
     ruta = PROGRESO_DIR / f"{documento_id}.json"
     if not ruta.exists():
         return None
-    datos = json.loads(ruta.read_text(encoding="utf-8"))
-    return ProgresoAuditoriaResponse(**datos)
+    try:
+        contenido = ruta.read_text(encoding="utf-8").strip()
+        if not contenido:
+            return None
+        datos = json.loads(contenido)
+        return ProgresoAuditoriaResponse(**datos)
+    except (json.JSONDecodeError, Exception):
+        return None
 
 
 @router.post(
@@ -42,7 +49,7 @@ def _leer_progreso(documento_id: str) -> ProgresoAuditoriaResponse | None:
     response_model=DocumentoCargadoResponse,
     summary="HU-001: Cargar documento PDF",
 )
-async def cargar_pdf(archivo: UploadFile = File(...), background_tasks: BackgroundTasks = None):
+async def cargar_pdf(archivo: UploadFile = File(...)):
     """
     Recibe un PDF, lo valida, guarda y arranca la auditoría automáticamente.
     """
@@ -89,8 +96,13 @@ async def cargar_pdf(archivo: UploadFile = File(...), background_tasks: Backgrou
         mensaje_progreso="Iniciando auditoría...",
     ))
 
-    # Arrancar pipeline automáticamente
-    background_tasks.add_task(_ejecutar_pipeline, documento_id, ruta_pdf)
+    # Arrancar pipeline en thread del proceso principal
+    hilo = threading.Thread(
+        target=_ejecutar_pipeline,
+        args=(documento_id, ruta_pdf),
+        daemon=True,
+    )
+    hilo.start()
 
     return DocumentoCargadoResponse(
         documento_id=documento_id,
@@ -162,7 +174,6 @@ async def ver_progreso(documento_id: str):
                     })
                     yield f"data: {payload}\n\n"
                     return
-                # Keepalive para que el browser no cierre la conexión
                 yield ": keep-alive\n\n"
                 continue
 
@@ -177,7 +188,7 @@ async def ver_progreso(documento_id: str):
 
             await asyncio.sleep(0.5)
             ticks += 1
-            if ticks % 30 == 0:  # ping cada ~15 s para mantener conexión viva
+            if ticks % 30 == 0:
                 yield ": keep-alive\n\n"
 
     return StreamingResponse(
@@ -190,11 +201,16 @@ async def ver_progreso(documento_id: str):
         },
     )
 
+
 def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
+    import logging
     from app.services.grafo.extraccion_service import extraccion_service
     from app.services.grafo.grafo_carga_service import grafo_carga_service
 
+    _log = logging.getLogger(__name__)
+
     def actualizar(porcentaje: int, mensaje: str) -> None:
+        _log.info(f"[pipeline] {porcentaje}% — {mensaje}")
         _guardar_progreso(ProgresoAuditoriaResponse(
             documento_id=documento_id,
             estado=EstadoIngesta.PROCESANDO,
@@ -212,15 +228,19 @@ def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
         actualizar(40, "Extrayendo referencias bibliográficas...")
         referencias = extraccion_service.extraer_referencias(texto_md)
 
-        actualizar(60, "Detectando citas en el texto...")
+        actualizar(55, "Detectando citas en el texto...")
         citas = extraccion_service.extraer_citas(texto_md, num_paginas)
 
-        actualizar(75, "Construyendo grafo de conocimiento...")
+        actualizar(70, "Construyendo grafo de conocimiento...")
         grafo_carga_service.cargar_documento(documento_id, ruta_pdf.name)
         grafo_carga_service.cargar_referencias(documento_id, referencias)
         grafo_carga_service.cargar_citas(documento_id, citas)
 
-        actualizar(80, "Verificando referencias en CrossRef...")
+        actualizar(78, "Vinculando citas con sus referencias...")
+        resultado_vinculacion = grafo_carga_service.vincular_citas(documento_id)
+        _log.info(f"[pipeline] vinculacion_completada {resultado_vinculacion}")
+
+        actualizar(85, "Verificando referencias en CrossRef...")
         from app.services.externo.verificacion_service import verificacion_service
         verificacion_service.verificar_referencias(referencias, documento_id)
 
@@ -231,10 +251,10 @@ def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
             mensaje_progreso="Auditoría completada exitosamente.",
             citas_encontradas=len(citas),
         ))
-        logger.info("auditoria_completada", doc_id=documento_id, citas=len(citas))
+        _log.info(f"[pipeline] auditoria_completada doc_id={documento_id} citas={len(citas)}")
 
     except Exception as e:
-        logger.error("auditoria_fallida", doc_id=documento_id, error=str(e))
+        _log.error(f"[pipeline] auditoria_fallida doc_id={documento_id} error={str(e)}", exc_info=True)
         _guardar_progreso(ProgresoAuditoriaResponse(
             documento_id=documento_id,
             estado=EstadoIngesta.ERROR,
