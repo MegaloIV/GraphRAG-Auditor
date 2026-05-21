@@ -104,6 +104,39 @@ class TestParsearJson:
         assert resultado == []
 
 
+class TestClasificacionTipoCita:
+    """Garantiza que el tipo se determina por texto_cita, ignorando lo que devuelva el LLM."""
+
+    def _mock_completar(self, tipo_llm: str):
+        """Devuelve un mock que reporta siempre el tipo_llm indicado."""
+        def completar_mock(system_prompt: str, user_prompt: str, **kwargs) -> str:
+            return (
+                f'[{{"texto_cita": "(Arévalo et al., 2021)", "tipo": "{tipo_llm}",'
+                f' "pagina": 1, "fragmento_oracion": "Texto (Arévalo et al., 2021)."}},'
+                f' {{"texto_cita": "García (2020)", "tipo": "{tipo_llm}",'
+                f' "pagina": 1, "fragmento_oracion": "García (2020) propone un modelo."}}]'
+            )
+        return completar_mock
+
+    def test_parentetica_cuando_texto_empieza_con_parentesis(self, monkeypatch, service):
+        monkeypatch.setattr(
+            extraccion_mod.llm_service, "completar",
+            self._mock_completar("narrativa"),  # LLM dice NARRATIVA, debe corregirse
+        )
+        citas = service.extraer_citas("Texto (Arévalo et al., 2021).", num_paginas=1)
+        parentetica = next(c for c in citas if c.texto_cita.startswith("("))
+        assert parentetica.tipo.value == "parentetica"
+
+    def test_narrativa_cuando_texto_no_empieza_con_parentesis(self, monkeypatch, service):
+        monkeypatch.setattr(
+            extraccion_mod.llm_service, "completar",
+            self._mock_completar("parentetica"),  # LLM dice PARENTETICA, debe corregirse
+        )
+        citas = service.extraer_citas("García (2020) propone un modelo.", num_paginas=1)
+        narrativa = next(c for c in citas if not c.texto_cita.startswith("("))
+        assert narrativa.tipo.value == "narrativa"
+
+
 class TestExtraerCitasSystemPrompt:
     """Integración: verifica que extraer_citas pasa el system prompt correcto al LLM."""
 

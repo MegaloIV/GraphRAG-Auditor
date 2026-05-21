@@ -188,9 +188,10 @@ class EntidadExtractionService:
                 for cita in citas_raw:
                     texto_cita = cita.get("texto_cita", "")
                     fragmento = cita.get("fragmento_oracion", "").strip()
+                    # Clasificación determinista: no se delega al LLM
                     tipo = (
                         TipoCita.PARENTETICA
-                        if cita.get("tipo") == "parentetica"
+                        if texto_cita.strip().startswith("(")
                         else TipoCita.NARRATIVA
                     )
                     if not fragmento or fragmento == texto_cita:
