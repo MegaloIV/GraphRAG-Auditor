@@ -259,6 +259,7 @@ class AuditoriaService:
         return VeredictoAuditoria(
             cita_id=cita_id,
             texto_cita=texto_cita,
+            fragmento_oracion=fragmento_oracion,
             pagina=pagina,
             veredicto=veredicto_tipo,
             justificacion=justificacion,
