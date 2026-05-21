@@ -8,6 +8,36 @@ from app.models.grafo import ReferenciaAPA, CitaEnTexto, TipoCita
 
 logger = structlog.get_logger(__name__)
 
+# Compiled from the original inline patron in extraer_referencias.
+# Covers markdown headings, bold, and simple numbered formats.
+_RE_REFERENCIAS = re.compile(
+    r'^(\*{1,2})?\s*#{0,3}\s*'
+    r'(referencias?\s*bibliogr[áa]ficas?|referencias?|bibliograf[íi]a|references?'
+    r'|works?\s+cited|fuentes?\s+bibliogr[áa]ficas?|fuentes?\s+de\s+consulta'
+    r'|\d+[\.\s]+referencias?|\d+[\.\s]+bibliograf[íi]a)'
+    r'\s*(\*{1,2})?\s*$',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Numbered heading with optional word suffix: "7.  Referencias bibliográficas"
+_RE_REFERENCIAS_NUMERADA = re.compile(
+    r'^\d+\.?\s+(?:referencias?(?:\s+\w+)?|bibliograf[íi]a(?:\s+\w+)?)\s*$',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Matches the start of an Annexes/Appendix section as a standalone heading line.
+# Covers: markdown # / ## / ###, **bold**, plain text, and all-caps variants.
+_RE_INICIO_ANEXOS = re.compile(
+    r'^(?:#{1,3}\s+)?(?:\*{1,2})?\s*'
+    r'(Anexos?|Ap[eé]ndices?|Appendix)'
+    r'\s*(?:\*{1,2})?\s*$',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Matches plain-text numbered annex lines: "Anexo 2." or "Anexo 3:"
+# Only used after the 70% position threshold to avoid false positives in the body.
+_RE_ANEXO_NUMERADO = re.compile(r'^Anexo\s+\d+[\.\:]', re.MULTILINE)
+
 SYSTEM_REFERENCIAS = """Eres un extractor de referencias bibliográficas APA 7ma edición.
 Extrae CADA referencia como un objeto JSON separado, uno por línea.
 NO uses array. Cada línea debe ser un JSON válido independiente.
@@ -27,33 +57,45 @@ Tipos de cita APA:
 - Parentética: (Apellido, año) o (Apellido & Apellido, año) o (Apellido et al., año)
 - Narrativa: Apellido (año)
 
-Para fragmento_oracion debes extraer el párrafo completo donde aparece la cita.
+Reglas para fragmento_oracion según tipo de cita:
 
-Ejemplo de texto:
-"Los modelos de lenguaje han revolucionado el NLP. Estudios recientes demuestran que pueden generar texto coherente. Sin embargo, presentan problemas de alucinación factual donde inventan datos que no existen (Brown et al., 2020). Esto representa un riesgo crítico en aplicaciones médicas."
+CITA PARENTÉTICA (Autor, año):
+- Identifica a qué idea pertenece esta cita.
+- El fragmento empieza donde empieza esa idea: al inicio del párrafo, o justo después del cierre del paréntesis de la cita anterior si hay una.
+- El fragmento termina exactamente al cierre del paréntesis de esta cita: ")".
+- NO incluyas texto que pertenezca a la siguiente cita.
 
-Ejemplo de resultado correcto:
-{
-  "texto_cita": "(Brown et al., 2020)",
-  "tipo": "parentetica",
-  "pagina": 5,
-  "fragmento_oracion": "Los modelos de lenguaje han revolucionado el NLP. Estudios recientes demuestran que pueden generar texto coherente. Sin embargo, presentan problemas de alucinación factual donde inventan datos que no existen (Brown et al., 2020). Esto representa un riesgo crítico en aplicaciones médicas."
-}
+CITA NARRATIVA Autor (año):
+- El fragmento empieza en el nombre del autor, o en el conector previo si lo hay ("Según", "Para", "De acuerdo con", etc.).
+- El fragmento termina donde termina la idea atribuida a ese autor (punto seguido, o inicio de otra cita).
 
-Ejemplo de resultado INCORRECTO (no hagas esto):
-{
-  "texto_cita": "(Brown et al., 2020)",
-  "tipo": "parentetica",
-  "pagina": 5,
-  "fragmento_oracion": "(Brown et al., 2020)"
-}
+CITA COMPUESTA (Autor1, año; Autor2, año):
+- Es UNA sola cita. El campo texto_cita debe contener el paréntesis completo con todas las referencias internas.
+- El fragmento_oracion es uno solo para todo el paréntesis completo.
+- NO la dividas en entradas separadas.
+- CORRECTO:   "texto_cita": "(Cheng et al., 2025; Haan, 2025)"  → una entrada, un fragmento
+- INCORRECTO: dos entradas separadas, una para Cheng y otra para Haan
+
+Ejemplo con dos citas en el mismo párrafo:
+
+Texto: "El rigor en la precisión semántica es fundamental para la ingeniería. (Arévalo et al., 2021) demuestran que se cometen errores semánticos (Samat et al., 2025)."
+
+CORRECTO para Arévalo:
+  texto_cita: "(Arévalo et al., 2021)"
+  fragmento_oracion: "El rigor en la precisión semántica es fundamental para la ingeniería. (Arévalo et al., 2021)"
+
+CORRECTO para Samat:
+  texto_cita: "(Samat et al., 2025)"
+  fragmento_oracion: "demuestran que se cometen errores semánticos (Samat et al., 2025)"
+
+INCORRECTO para Arévalo (NO hagas esto):
+  fragmento_oracion: "El rigor en la precisión semántica es fundamental para la ingeniería. (Arévalo et al., 2021) demuestran que se cometen errores semánticos (Samat et al., 2025)"
+  razón: el fragmento cruza hacia la siguiente cita
 
 Reglas estrictas:
-- fragmento_oracion DEBE ser el párrafo completo que contiene la cita, no solo la cita
-- NUNCA pongas en fragmento_oracion solo el texto_cita — eso es incorrecto
-- Si el párrafo supera 800 caracteres, incluye al menos las 2 oraciones antes y 2 después de la cita
-- Si no encuentras el párrafo, copia las 3 oraciones más cercanas a la cita
-- NUNCA dejes fragmento_oracion vacío o igual a texto_cita"""
+- NUNCA dejes fragmento_oracion vacío o igual a texto_cita
+- NUNCA incluyas en un fragmento texto que pertenezca a la siguiente cita
+- El fragmento de una cita parentética SIEMPRE termina en ")" de esa cita"""
 
 
 class EntidadExtractionService:
@@ -62,8 +104,8 @@ class EntidadExtractionService:
         """
         Extrae SOLO la sección de referencias, no todo el documento.
         """
-        patron = r'(?i)^(\*{1,2})?\s*#{0,3}\s*(referencias?\s*bibliogr[áa]ficas?|referencias?|bibliograf[íi]a|references?|works?\s+cited|fuentes?\s+bibliogr[áa]ficas?|fuentes?\s+de\s+consulta|\d+[\.\s]+referencias?|\d+[\.\s]+bibliograf[íi]a)\s*(\*{1,2})?\s*$'
-        match = re.search(patron, texto, re.MULTILINE)
+        texto = self._truncar_antes_de_anexos(texto)
+        match = self._encontrar_inicio_referencias(texto)
         if match:
             texto_referencias = texto[match.start():]
             logger.info("seccion_referencias_encontrada", chars=len(texto_referencias))
@@ -107,8 +149,8 @@ class EntidadExtractionService:
         Detecta citas APA en el cuerpo del texto (HU-005).
         Excluye la sección de referencias para evitar falsos positivos.
         """
-        patron_refs = r'(?i)^(\*{1,2})?\s*#{0,3}\s*(referencias?\s*bibliogr[áa]ficas?|referencias?|bibliograf[íi]a|references?)\s*(\*{1,2})?\s*$'
-        match = re.search(patron_refs, texto, re.MULTILINE)
+        texto = self._truncar_antes_de_anexos(texto)
+        match = self._encontrar_inicio_referencias(texto)
 
         if match:
             texto_cuerpo = texto[:match.start()]
@@ -126,29 +168,35 @@ class EntidadExtractionService:
 
         for i, bloque in enumerate(bloques):
             pagina_estimada = max(1, int((i / len(bloques)) * num_paginas))
+            citas_en_bloque = self._detectar_citas_regex(bloque)
+            lista_citas = (
+                "\n".join(f"- {c}" for c in sorted(citas_en_bloque))
+                if citas_en_bloque
+                else "(ninguna detectada)"
+            )
             try:
                 respuesta = llm_service.completar(
                     system_prompt=SYSTEM_CITAS,
-                    user_prompt=f"Detecta las citas APA en este fragmento (página aprox. {pagina_estimada}):\n\n{bloque}",
+                    user_prompt=(
+                        f"Detecta las citas APA en este fragmento"
+                        f" (página aprox. {pagina_estimada}).\n\n"
+                        f"Citas detectadas por regex en este fragmento:\n{lista_citas}\n\n"
+                        f"Texto:\n{bloque}"
+                    ),
                 )
                 citas_raw = self._parsear_json(respuesta)
                 for cita in citas_raw:
-                    fragmento = cita.get("fragmento_oracion", "")
                     texto_cita = cita.get("texto_cita", "")
-
-                    # Si el LLM devuelve el fragmento igual a la cita, lo descartamos
-                    if fragmento.strip() == texto_cita.strip():
-                        fragmento = ""
-                        logger.warning(
-                            "fragmento_oracion_igual_a_cita",
-                            cita=texto_cita,
-                        )
-
+                    fragmento = cita.get("fragmento_oracion", "").strip()
                     tipo = (
                         TipoCita.PARENTETICA
                         if cita.get("tipo") == "parentetica"
                         else TipoCita.NARRATIVA
                     )
+                    if not fragmento or fragmento == texto_cita:
+                        if fragmento == texto_cita:
+                            logger.warning("fragmento_oracion_igual_a_cita", cita=texto_cita)
+                        fragmento = ""
                     todas.append(CitaEnTexto(
                         cita_id=str(uuid.uuid4()),
                         texto_cita=texto_cita,
@@ -163,6 +211,53 @@ class EntidadExtractionService:
         logger.info("fragmentos_extraidos", fragmentos=[c.fragmento_oracion[:50] if c.fragmento_oracion else "VACÍO" for c in todas])
         logger.info("citas_extraidas", total=len(todas))
         return todas
+
+    @staticmethod
+    def _encontrar_inicio_referencias(texto: str):
+        """
+        Returns the first re.Match for the references section heading, or None.
+        Tries the comprehensive pattern (_RE_REFERENCIAS) first; falls back to
+        the numbered-with-suffix pattern (_RE_REFERENCIAS_NUMERADA) to cover
+        plain-text headings like "7.  Referencias bibliográficas".
+        """
+        match = _RE_REFERENCIAS.search(texto)
+        if not match:
+            match = _RE_REFERENCIAS_NUMERADA.search(texto)
+        if match:
+            logger.debug("encabezado_referencias_detectado", encabezado=match.group().strip())
+        return match
+
+    @staticmethod
+    def _truncar_antes_de_anexos(texto: str) -> str:
+        """
+        Drops everything from the Annexes/Appendix heading onward.
+        Must be called before any reference or citation detection.
+
+        Two detection strategies (earliest match wins):
+        - _RE_INICIO_ANEXOS: markdown / bold / all-caps heading (no position constraint).
+        - _RE_ANEXO_NUMERADO: plain-text "Anexo N." line, only after 70% of the document
+          to avoid false positives from in-body references like "como se ve en el Anexo 2".
+        """
+        posicion = len(texto)
+
+        m_heading = _RE_INICIO_ANEXOS.search(texto)
+        if m_heading:
+            posicion = m_heading.start()
+
+        limite_70 = int(len(texto) * 0.70)
+        for m_num in _RE_ANEXO_NUMERADO.finditer(texto):
+            if m_num.start() >= limite_70:
+                posicion = min(posicion, m_num.start())
+                break
+
+        if posicion < len(texto):
+            logger.info(
+                "seccion_anexos_descartada",
+                posicion=posicion,
+                chars_descartados=len(texto) - posicion,
+            )
+            return texto[:posicion]
+        return texto
 
     def _detectar_citas_regex(self, texto: str) -> list[str]:
         patrones = [
