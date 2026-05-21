@@ -160,7 +160,7 @@ PROCESSED_DIR=./data/processed
 ### Iniciar Backend
 ```bash
 cd backend
-uvicorn app.main:app --reload --reload-dir app --port 8000
+z
 ```
 
 ### Iniciar Frontend
