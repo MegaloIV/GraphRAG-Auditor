@@ -27,7 +27,7 @@ class VerificacionService:
         self,
         referencias: list[ReferenciaAPA],
         documento_id: str,
-        max_referencias: int = 5,
+        max_referencias: int = 10,
     ) -> dict:
         """
         Verifica las referencias de un documento.
