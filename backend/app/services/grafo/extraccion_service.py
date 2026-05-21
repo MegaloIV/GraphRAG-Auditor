@@ -57,6 +57,17 @@ Tipos de cita APA:
 - Parentética: (Apellido, año) o (Apellido & Apellido, año) o (Apellido et al., año)
 - Narrativa: Apellido (año)
 
+Campo "tipo" — regla obligatoria:
+- Si el apellido aparece DENTRO del paréntesis → tipo: "PARENTETICA"
+  Ejemplo: "(Arévalo et al., 2021)", "(Smith, 2020)"
+- Si el apellido está FUERA del paréntesis y solo el año va dentro → tipo: "NARRATIVA"
+  Ejemplo: "Arévalo et al. (2021)", "Smith (2020)"
+El valor SIEMPRE debe ser exactamente "PARENTETICA" o "NARRATIVA", nunca otro valor.
+
+Campo "texto_cita" — reproduce la cita tal como aparece en el texto original:
+- Parentética: "(Arévalo et al., 2021)"
+- Narrativa: "Arévalo et al. (2021)"
+
 Reglas para fragmento_oracion según tipo de cita:
 
 CITA PARENTÉTICA (Autor, año):
@@ -188,10 +199,9 @@ class EntidadExtractionService:
                 for cita in citas_raw:
                     texto_cita = cita.get("texto_cita", "")
                     fragmento = cita.get("fragmento_oracion", "").strip()
-                    # Clasificación determinista: no se delega al LLM
                     tipo = (
                         TipoCita.PARENTETICA
-                        if texto_cita.strip().startswith("(")
+                        if cita.get("tipo", "").upper() == "PARENTETICA"
                         else TipoCita.NARRATIVA
                     )
                     if not fragmento or fragmento == texto_cita:

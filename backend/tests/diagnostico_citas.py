@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import pymupdf4llm
 
+import app.services.grafo.extraccion_service as extraccion_mod
 from app.services.grafo.extraccion_service import EntidadExtractionService
 
 PDF_PATH = Path(__file__).parent / "Informe de tesis_AlcaldeLavadoMatias.pdf"
@@ -32,17 +33,39 @@ def main() -> None:
     print(f"Texto tras truncar anexos: {len(texto_truncado)} chars | páginas estimadas: {num_paginas}")
     print("Extrayendo citas (incluye llamada al LLM)…\n")
 
-    citas = service.extraer_citas(texto_truncado, num_paginas)
+    # Interceptar completar() para capturar el valor raw de "tipo" que devuelve
+    # el LLM, antes de que el servicio lo mapee a TipoCita.
+    tipo_llm_por_cita: dict[str, str] = {}
+    completar_original = extraccion_mod.llm_service.completar
+
+    def completar_interceptado(system_prompt: str, user_prompt: str, **kwargs) -> str:
+        respuesta = completar_original(system_prompt, user_prompt, **kwargs)
+        for cita_raw in service._parsear_json(respuesta):
+            texto = cita_raw.get("texto_cita", "")
+            # "AUSENTE" deja claro que el LLM no incluyó el campo en absoluto
+            tipo = cita_raw.get("tipo", "AUSENTE")
+            if texto:
+                tipo_llm_por_cita[texto] = tipo
+        return respuesta
+
+    extraccion_mod.llm_service.completar = completar_interceptado
+    try:
+        citas = service.extraer_citas(texto_truncado, num_paginas)
+    finally:
+        extraccion_mod.llm_service.completar = completar_original
 
     muestra = citas[:NUM_CITAS]
     sep = "═" * 50
 
     for i, cita in enumerate(muestra, start=1):
+        tipo_llm   = tipo_llm_por_cita.get(cita.texto_cita, "AUSENTE")
+        tipo_final = cita.tipo.value.upper()
         print(sep)
         print(f"CITA {i}")
         print(sep)
         print(f"texto_cita    : {cita.texto_cita}")
-        print(f"tipo          : {cita.tipo.value.upper()}")
+        print(f"tipo_llm      : {tipo_llm}")
+        print(f"tipo_final    : {tipo_final}")
         print(f"pagina        : {cita.pagina}")
         fragmento = cita.fragmento_oracion or ""
         print(f'fragmento     : "{fragmento}"')
