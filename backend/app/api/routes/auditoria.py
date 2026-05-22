@@ -19,6 +19,7 @@ from app.models.auditoria import (
     AlertasResponse,
     AlertaInconsistencia,
     AlertasAlucinacionResponse,
+    MetricasRagasResponse,
 )
 
 logger = structlog.get_logger(__name__)
@@ -111,6 +112,11 @@ async def ver_veredictos(documento_id: str):
       c.veredicto     AS veredicto,
       c.justificacion AS justificacion,
       c.pagina_paper  AS pagina_paper,
+      c.faithfulness       AS faithfulness,
+      c.answer_relevancy   AS answer_relevancy,
+      c.context_precision  AS context_precision,
+      c.context_recall     AS context_recall,
+      c.answer_correctness AS answer_correctness,
       r.id            AS ref_id,
       r.titulo_oficial AS ref_titulo_oficial,
       r.titulo        AS ref_titulo,
@@ -152,6 +158,11 @@ async def ver_veredictos(documento_id: str):
                 doi_referencia=r["doi"],
                 autores_referencia=r["autores"] or [],
                 pagina_paper=r.get("pagina_paper"),
+                faithfulness=r.get("faithfulness"),
+                answer_relevancy=r.get("answer_relevancy"),
+                context_precision=r.get("context_precision"),
+                context_recall=r.get("context_recall"),
+                answer_correctness=r.get("answer_correctness"),
             ))
 
         validas         = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.VALIDA)
@@ -281,6 +292,106 @@ async def ver_alertas_alucinaciones(documento_id: str):
 
     except Exception as e:
         logger.error("error_alertas_alucinaciones", doc_id=documento_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"codigo": "ERROR_INTERNO", "mensaje": str(e),
+                    "accion_sugerida": "Intenta nuevamente."},
+        )
+
+
+# ── EP-RAGAS: Evaluación RAGAS del documento ────────────────────────────────
+
+@router.post(
+    "/{documento_id}/evaluar-ragas",
+    response_model=MetricasRagasResponse,
+    summary="EP-RAGAS: Evaluar las citas con fragmento de paper disponible",
+)
+async def evaluar_ragas(documento_id: str):
+    """
+    Evalúa con RAGAS las citas que tienen fragmento de evidencia.
+    Persiste los scores en cada Cita y retorna los promedios.
+    """
+    try:
+        resultado = auditoria_service.evaluar_ragas_documento(documento_id)
+
+        if resultado.get("total_evaluadas", 0) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "codigo": "SIN_EVIDENCIA",
+                    "mensaje": (
+                        "No hay citas con fragmento de paper disponible "
+                        "para evaluar. Verifica que los papers estén indexados."
+                    ),
+                    "accion_sugerida": "Indexa los papers citados y vuelve a auditar.",
+                },
+            )
+
+        return MetricasRagasResponse(**resultado)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("error_evaluar_ragas", doc_id=documento_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"codigo": "ERROR_INTERNO", "mensaje": str(e),
+                    "accion_sugerida": "Intenta nuevamente."},
+        )
+
+
+@router.get(
+    "/{documento_id}/metricas",
+    response_model=MetricasRagasResponse,
+    summary="EP-RAGAS: Ver métricas RAGAS promedio del documento",
+)
+async def ver_metricas(documento_id: str):
+    """
+    Lee los scores RAGAS ya calculados en cada Cita y retorna
+    los promedios del documento.
+    """
+    query = """
+    MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
+    WHERE c.faithfulness IS NOT NULL
+    RETURN
+      avg(c.faithfulness)       AS faithfulness_promedio,
+      avg(c.answer_relevancy)   AS answer_relevancy_promedio,
+      avg(c.context_precision)  AS context_precision_promedio,
+      avg(c.context_recall)     AS context_recall_promedio,
+      avg(c.answer_correctness) AS answer_correctness_promedio,
+      count(c)                  AS total_citas_evaluadas
+    """
+    try:
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            registro = session.run(query, doc_id=documento_id).single()
+
+        total = registro["total_citas_evaluadas"] if registro else 0
+        if total == 0:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "codigo": "METRICAS_NO_ENCONTRADAS",
+                    "mensaje": "No hay métricas RAGAS calculadas para este documento.",
+                    "accion_sugerida": "Ejecuta primero POST /auditoria/{documento_id}/evaluar-ragas.",
+                },
+            )
+
+        def _redondear(v):
+            return round(float(v), 3) if v is not None else None
+
+        return MetricasRagasResponse(
+            total_evaluadas=total,
+            faithfulness_promedio=_redondear(registro["faithfulness_promedio"]),
+            answer_relevancy_promedio=_redondear(registro["answer_relevancy_promedio"]),
+            context_precision_promedio=_redondear(registro["context_precision_promedio"]),
+            context_recall_promedio=_redondear(registro["context_recall_promedio"]),
+            answer_correctness_promedio=_redondear(registro["answer_correctness_promedio"]),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("error_ver_metricas", doc_id=documento_id, error=str(e))
         raise HTTPException(
             status_code=500,
             detail={"codigo": "ERROR_INTERNO", "mensaje": str(e),

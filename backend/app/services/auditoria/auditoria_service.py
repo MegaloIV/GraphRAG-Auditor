@@ -14,10 +14,12 @@ Veredictos:
 """
 import structlog
 from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from app.core.config import get_settings
 from app.services.grafo.neo4j_service import neo4j_service
 from app.services.recuperacion.recuperacion_service import recuperacion_service
+from app.services.vectorstore.supabase_service import supabase_vector_service
 from app.services.llm.openai_client import llm_service
 from app.models.auditoria import (
     VeredictoAuditoria,
@@ -60,6 +62,7 @@ RETURN
   r.titulo    AS ref_titulo,
   r.titulo_oficial AS ref_titulo_oficial,
   r.anio      AS ref_anio,
+  r.doi_verificado AS doi_verificado,
   collect(DISTINCT a.nombre) AS autores
 """
 
@@ -75,10 +78,11 @@ RETURN DISTINCT r.id AS ref_id
 
 _Q_GUARDAR_VEREDICTO = """
 MATCH (c:Cita {id: $cita_id})
-SET c.veredicto         = $veredicto,
-    c.justificacion     = $justificacion,
-    c.auditado_en       = datetime(),
-    c.pagina_paper      = $pagina_paper
+SET c.veredicto           = $veredicto,
+    c.justificacion       = $justificacion,
+    c.auditado_en         = datetime(),
+    c.pagina_paper        = $pagina_paper,
+    c.fragmento_evidencia = $fragmento_evidencia
 """
 
 
@@ -102,30 +106,31 @@ class AuditoriaService:
         veredictos = []
         total = len(citas_raw)
 
-        for i, registro in enumerate(citas_raw):
-            cita_id           = registro["cita_id"]
-            texto_cita        = registro["texto_cita"] or ""
-            fragmento_oracion = registro["fragmento_oracion"] or ""
-            pagina            = registro["pagina"] or 0
-            ref_id            = registro["ref_id"]
-            ref_titulo        = registro["ref_titulo_oficial"] or registro["ref_titulo"] or ""
-            ref_anio          = registro["ref_anio"]
-            autores           = registro["autores"] or []
+        logger.info("auditoria_paralela_iniciada", doc_id=documento_id, total=total, max_workers=5)
 
-            logger.info("auditando_cita", numero=i + 1, total=total, cita=texto_cita[:60])
-
-            veredicto = self._auditar_cita(
-                documento_id=documento_id,
-                cita_id=cita_id,
-                texto_cita=texto_cita,
-                fragmento_oracion=fragmento_oracion,
-                pagina=pagina,
-                ref_id=ref_id,
-                ref_titulo=ref_titulo,
-                ref_anio=ref_anio,
-                autores=autores,
-            )
-            veredictos.append(veredicto)
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(
+                    self._auditar_cita,
+                    documento_id=documento_id,
+                    cita_id=registro["cita_id"],
+                    texto_cita=registro["texto_cita"] or "",
+                    fragmento_oracion=registro["fragmento_oracion"] or "",
+                    pagina=registro["pagina"] or 0,
+                    ref_id=registro["ref_id"],
+                    ref_titulo=registro["ref_titulo_oficial"] or registro["ref_titulo"] or "",
+                    ref_anio=registro["ref_anio"],
+                    autores=registro["autores"] or [],
+                    doi_verificado=registro["doi_verificado"],
+                ): registro
+                for registro in citas_raw
+            }
+            for future in as_completed(futures):
+                try:
+                    veredicto = future.result()
+                    veredictos.append(veredicto)
+                except Exception as e:
+                    logger.error("error_auditando_cita", error=str(e))
 
         logger.info(
             "auditoria_completada",
@@ -216,6 +221,7 @@ class AuditoriaService:
         ref_titulo: str = "",
         ref_anio: int | None = None,
         autores: list[str] = [],
+        doi_verificado: str | None = None,
     ) -> VeredictoAuditoria:
         if not ref_id:
             veredicto = VeredictoAuditoria(
@@ -229,6 +235,23 @@ class AuditoriaService:
             )
             self._persistir_veredicto(veredicto, pagina_paper=None)
             return veredicto
+
+        # Saltar si el paper citado no está indexado en Supabase
+        if doi_verificado:
+            doi_normalizado = doi_verificado.replace("/", "_").replace(".", "_")
+            if not supabase_vector_service.paper_ya_indexado(doi_normalizado):
+                veredicto = VeredictoAuditoria(
+                    cita_id=cita_id,
+                    texto_cita=texto_cita,
+                    pagina=pagina,
+                    veredicto=VeredictoTipo.NO_VERIFICABLE,
+                    justificacion="El paper citado no está disponible en la base de conocimiento.",
+                    metodo_recuperacion="no_encontrado",
+                    pagina_paper=None,
+                    fragmento_evidencia="",
+                )
+                self._persistir_veredicto(veredicto, pagina_paper=None)
+                return veredicto
 
         resultado = recuperacion_service.consultar_cita(
             documento_id=documento_id,
@@ -361,9 +384,98 @@ class AuditoriaService:
                     veredicto=veredicto.veredicto.value,
                     justificacion=veredicto.justificacion,
                     pagina_paper=pagina_paper,
+                    fragmento_evidencia=veredicto.fragmento_evidencia or "",
                 )
         except Exception as e:
             logger.error("error_persistiendo_veredicto", cita_id=veredicto.cita_id, error=str(e))
+
+    # ── EP-RAGAS: Evaluación post-auditoría con RAGAS ──────────────────────
+
+    def evaluar_ragas_documento(self, doc_id: str) -> dict:
+        from app.services.evaluacion.ragas_service import ragas_service
+
+        # 1. Leer citas con fragmento_evidencia no vacío
+        _Q_LEER_CITAS = """
+            MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
+            WHERE c.fragmento IS NOT NULL
+              AND c.fragmento_evidencia IS NOT NULL
+              AND c.fragmento_evidencia <> ''
+              AND c.justificacion IS NOT NULL
+            RETURN
+                c.id                  AS cita_id,
+                c.fragmento           AS pregunta,
+                c.justificacion       AS respuesta,
+                c.fragmento_evidencia AS fragmento_evidencia
+        """
+        with neo4j_service.driver.session(
+            database=settings.neo4j_database
+        ) as session:
+            resultado = session.run(_Q_LEER_CITAS, doc_id=doc_id)
+            citas = [dict(r) for r in resultado]
+
+        if not citas:
+            logger.info("ragas_sin_citas_evaluables", doc_id=doc_id)
+            return {"total_evaluadas": 0}
+
+        logger.info("ragas_iniciando", doc_id=doc_id, total=len(citas))
+
+        # 2. Evaluar con RAGAS (Neo4j cerrado)
+        scores_por_cita = []
+        for i, cita in enumerate(citas, 1):
+            logger.info(
+                "ragas_evaluando_cita",
+                numero=i,
+                total=len(citas),
+            )
+            scores = ragas_service.evaluar_cita(
+                pregunta   = cita["pregunta"],
+                respuesta  = cita["respuesta"],
+                contextos  = [cita["fragmento_evidencia"]],
+                referencia = cita["fragmento_evidencia"],
+            )
+            scores_por_cita.append({
+                "cita_id": cita["cita_id"],
+                **scores
+            })
+
+        # 3. Guardar en Neo4j en batch
+        _Q_GUARDAR_RAGAS = """
+            MATCH (c:Cita {id: $cita_id})
+            SET c.faithfulness       = $faithfulness,
+                c.answer_relevancy   = $answer_relevancy,
+                c.context_precision  = $context_precision,
+                c.context_recall     = $context_recall,
+                c.answer_correctness = $answer_correctness,
+                c.ragas_evaluado_en  = datetime()
+        """
+        with neo4j_service.driver.session(
+            database=settings.neo4j_database
+        ) as session:
+            for scores in scores_por_cita:
+                try:
+                    session.run(_Q_GUARDAR_RAGAS, scores)
+                except Exception as e:
+                    logger.error(
+                        "ragas_error_guardando",
+                        cita_id=scores["cita_id"],
+                        error=str(e)
+                    )
+
+        def promedio(key):
+            vals = [
+                s[key] for s in scores_por_cita
+                if s.get(key) is not None
+            ]
+            return round(sum(vals) / len(vals), 3) if vals else None
+
+        return {
+            "total_evaluadas":             len(scores_por_cita),
+            "faithfulness_promedio":       promedio("faithfulness"),
+            "answer_relevancy_promedio":   promedio("answer_relevancy"),
+            "context_precision_promedio":  promedio("context_precision"),
+            "context_recall_promedio":     promedio("context_recall"),
+            "answer_correctness_promedio": promedio("answer_correctness"),
+        }
 
 
 # Singleton
