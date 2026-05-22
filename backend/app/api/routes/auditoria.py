@@ -1,0 +1,526 @@
+"""
+EP-004: Endpoints de Auditoría Semántica
+
+HU-010  POST /{doc_id}/auditar              → auditar todas las citas del documento
+HU-010  GET  /{doc_id}/veredictos           → ver veredictos ya calculados
+HU-011  GET  /{doc_id}/alertas              → inconsistencias estructurales
+HU-012  GET  /{doc_id}/alertas/alucinaciones → citas que el sistema no pudo verificar
+"""
+import io
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
+import structlog
+
+from app.core.config import get_settings
+from app.services.auditoria.auditoria_service import auditoria_service
+from app.services.grafo.neo4j_service import neo4j_service
+from app.models.auditoria import (
+    VeredictoAuditoria,
+    VeredictoTipo,
+    AuditoriaResponse,
+    AlertasResponse,
+    AlertaInconsistencia,
+    AlertasAlucinacionResponse,
+    MetricasRagasResponse,
+)
+
+logger = structlog.get_logger(__name__)
+settings = get_settings()
+router = APIRouter(prefix="/auditoria", tags=["Auditoría"])
+
+
+# ── HU-010: Auditar documento ────────────────────────────────────────────────
+
+@router.post(
+    "/{documento_id}/auditar",
+    response_model=AuditoriaResponse,
+    summary="HU-010: Auditar todas las citas del documento",
+)
+async def auditar_documento(documento_id: str):
+    """
+    Ejecuta la auditoría semántica completa:
+    por cada cita recupera evidencia del grafo + ChromaDB
+    y emite un veredicto con GPT-4o-mini.
+    Persiste los veredictos en Neo4j.
+    """
+    try:
+        veredictos = auditoria_service.auditar_documento(documento_id)
+
+        if not veredictos:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "codigo": "SIN_CITAS",
+                    "mensaje": "No se encontraron citas para auditar en este documento.",
+                    "accion_sugerida": "Verifica que la auditoría inicial se haya completado.",
+                },
+            )
+
+        validas        = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.VALIDA)
+        dudosas        = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.DUDOSA)
+        alucinadas     = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.ALUCINADA)
+        no_verificables = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.NO_VERIFICABLE)
+
+        advertencia = None
+        if no_verificables > 0:
+            advertencia = (
+                f"{no_verificables} cita(s) no pudieron verificarse por falta de evidencia. "
+                f"Revisa las alertas de alucinación del sistema."
+            )
+
+        return AuditoriaResponse(
+            documento_id=documento_id,
+            total_citas=len(veredictos),
+            validas=validas,
+            dudosas=dudosas,
+            alucinadas=alucinadas,
+            no_verificables=no_verificables,
+            veredictos=veredictos,
+            advertencia=advertencia,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("error_auditar_documento", doc_id=documento_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"codigo": "ERROR_INTERNO", "mensaje": str(e),
+                    "accion_sugerida": "Intenta nuevamente."},
+        )
+
+
+# ── HU-010: Ver veredictos ya calculados ─────────────────────────────────────
+
+@router.get(
+    "/{documento_id}/veredictos",
+    response_model=AuditoriaResponse,
+    summary="HU-010: Ver veredictos de auditoría ya calculados",
+)
+async def ver_veredictos(documento_id: str):
+    """
+    Lee los veredictos persistidos en Neo4j sin volver a llamar al LLM.
+    """
+    query = """
+    MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
+    WHERE c.veredicto IS NOT NULL
+    OPTIONAL MATCH (c)-[:CITA_A]->(r:Referencia)
+    OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
+    RETURN
+      c.id            AS cita_id,
+      c.texto         AS texto_cita,
+      c.fragmento     AS fragmento_oracion,
+      c.pagina        AS pagina,
+      c.veredicto     AS veredicto,
+      c.justificacion AS justificacion,
+      c.pagina_paper  AS pagina_paper,
+      c.faithfulness       AS faithfulness,
+      c.answer_relevancy   AS answer_relevancy,
+      c.context_precision  AS context_precision,
+      c.context_recall     AS context_recall,
+      c.answer_correctness AS answer_correctness,
+      r.id            AS ref_id,
+      r.titulo_oficial AS ref_titulo_oficial,
+      r.titulo        AS ref_titulo,
+      r.anio          AS ref_anio,
+      r.doi_verificado AS doi,
+      collect(DISTINCT a.nombre) AS autores
+    """
+    try:
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            registros = list(session.run(query, doc_id=documento_id))
+
+        if not registros:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "codigo": "VEREDICTOS_NO_ENCONTRADOS",
+                    "mensaje": "No hay veredictos calculados para este documento.",
+                    "accion_sugerida": "Ejecuta primero POST /auditoria/{documento_id}/auditar.",
+                },
+            )
+
+        veredictos = []
+        for r in registros:
+            try:
+                tipo = VeredictoTipo(r["veredicto"])
+            except ValueError:
+                tipo = VeredictoTipo.NO_VERIFICABLE
+
+            veredictos.append(VeredictoAuditoria(
+                cita_id=r["cita_id"],
+                texto_cita=r["texto_cita"] or "",
+                fragmento_oracion=r["fragmento_oracion"] or "",
+                pagina=r["pagina"] or 0,
+                veredicto=tipo,
+                justificacion=r["justificacion"] or "",
+                referencia_id=r["ref_id"],
+                titulo_referencia=r["ref_titulo_oficial"] or r["ref_titulo"],
+                anio_referencia=r["ref_anio"],
+                doi_referencia=r["doi"],
+                autores_referencia=r["autores"] or [],
+                pagina_paper=r.get("pagina_paper"),
+                faithfulness=r.get("faithfulness"),
+                answer_relevancy=r.get("answer_relevancy"),
+                context_precision=r.get("context_precision"),
+                context_recall=r.get("context_recall"),
+                answer_correctness=r.get("answer_correctness"),
+            ))
+
+        validas         = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.VALIDA)
+        dudosas         = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.DUDOSA)
+        alucinadas      = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.ALUCINADA)
+        no_verificables = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.NO_VERIFICABLE)
+
+        return AuditoriaResponse(
+            documento_id=documento_id,
+            total_citas=len(veredictos),
+            validas=validas,
+            dudosas=dudosas,
+            alucinadas=alucinadas,
+            no_verificables=no_verificables,
+            veredictos=veredictos,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("error_ver_veredictos", doc_id=documento_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"codigo": "ERROR_INTERNO", "mensaje": str(e),
+                    "accion_sugerida": "Intenta nuevamente."},
+        )
+
+
+# ── HU-011: Alertas de inconsistencias estructurales ────────────────────────
+
+@router.get(
+    "/{documento_id}/alertas",
+    response_model=AlertasResponse,
+    summary="HU-011: Ver alertas de citas sin referencia y referencias sin citar",
+)
+async def ver_alertas(documento_id: str):
+    """
+    Detecta inconsistencias estructurales:
+    - Citas en el cuerpo sin referencia bibliográfica correspondiente
+    - Referencias listadas que nunca se citan en el texto
+    """
+    try:
+        resultado = auditoria_service.detectar_inconsistencias(documento_id)
+
+        citas_sin_ref   = resultado["citas_sin_referencia"]
+        refs_sin_citar  = resultado["referencias_sin_citar"]
+        total           = len(citas_sin_ref) + len(refs_sin_citar)
+
+        if total == 0:
+            mensaje = "No se detectaron inconsistencias estructurales. Todas las citas tienen referencia y todas las referencias están citadas."
+        else:
+            partes = []
+            if citas_sin_ref:
+                partes.append(f"{len(citas_sin_ref)} cita(s) sin referencia")
+            if refs_sin_citar:
+                partes.append(f"{len(refs_sin_citar)} referencia(s) sin citar")
+            mensaje = "Se detectaron inconsistencias: " + " y ".join(partes) + "."
+
+        return AlertasResponse(
+            documento_id=documento_id,
+            citas_sin_referencia=citas_sin_ref,
+            referencias_sin_citar=refs_sin_citar,
+            total_inconsistencias=total,
+            mensaje=mensaje,
+        )
+
+    except Exception as e:
+        logger.error("error_ver_alertas", doc_id=documento_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"codigo": "ERROR_INTERNO", "mensaje": str(e),
+                    "accion_sugerida": "Intenta nuevamente."},
+        )
+
+
+# ── HU-012: Alertas de alucinaciones del sistema ────────────────────────────
+
+@router.get(
+    "/{documento_id}/alertas/alucinaciones",
+    response_model=AlertasAlucinacionResponse,
+    summary="HU-012: Ver alertas de citas que el sistema no pudo verificar",
+)
+async def ver_alertas_alucinaciones(documento_id: str):
+    """
+    Lista las citas con veredicto NO_VERIFICABLE — aquellas para las que
+    el sistema no encontró evidencia en el grafo ni en ChromaDB.
+    El revisor no debe confiar ciegamente en estos casos.
+    """
+    query = """
+    MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
+    WHERE c.veredicto = $veredicto
+    RETURN c.id AS cita_id, c.texto AS texto_cita,
+           c.pagina AS pagina, c.justificacion AS justificacion
+    """
+    try:
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            registros = list(session.run(
+                query,
+                doc_id=documento_id,
+                veredicto=VeredictoTipo.NO_VERIFICABLE.value,
+            ))
+
+        from app.models.auditoria import AlertaAlucinacionSistema
+        alertas = [
+            AlertaAlucinacionSistema(
+                cita_id=r["cita_id"],
+                texto_cita=r["texto_cita"] or "",
+                pagina=r["pagina"] or 0,
+                razon_no_verificable=r["justificacion"] or "",
+            )
+            for r in registros
+        ]
+
+        advertencia = None
+        if alertas:
+            advertencia = (
+                f"Se encontraron {len(alertas)} cita(s) que el sistema no pudo verificar. "
+                f"Estas citas requieren revisión manual."
+            )
+
+        return AlertasAlucinacionResponse(
+            documento_id=documento_id,
+            total_no_verificables=len(alertas),
+            alertas=alertas,
+            advertencia=advertencia,
+        )
+
+    except Exception as e:
+        logger.error("error_alertas_alucinaciones", doc_id=documento_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"codigo": "ERROR_INTERNO", "mensaje": str(e),
+                    "accion_sugerida": "Intenta nuevamente."},
+        )
+
+
+# ── EP-RAGAS: Evaluación RAGAS del documento ────────────────────────────────
+
+@router.post(
+    "/{documento_id}/evaluar-ragas",
+    response_model=MetricasRagasResponse,
+    summary="EP-RAGAS: Evaluar las citas con fragmento de paper disponible",
+)
+async def evaluar_ragas(documento_id: str):
+    """
+    Evalúa con RAGAS las citas que tienen fragmento de evidencia.
+    Persiste los scores en cada Cita y retorna los promedios.
+    """
+    try:
+        resultado = auditoria_service.evaluar_ragas_documento(documento_id)
+
+        if resultado.get("total_evaluadas", 0) == 0:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "codigo": "SIN_EVIDENCIA",
+                    "mensaje": (
+                        "No hay citas con fragmento de paper disponible "
+                        "para evaluar. Verifica que los papers estén indexados."
+                    ),
+                    "accion_sugerida": "Indexa los papers citados y vuelve a auditar.",
+                },
+            )
+
+        return MetricasRagasResponse(**resultado)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("error_evaluar_ragas", doc_id=documento_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"codigo": "ERROR_INTERNO", "mensaje": str(e),
+                    "accion_sugerida": "Intenta nuevamente."},
+        )
+
+
+@router.get(
+    "/{documento_id}/metricas",
+    response_model=MetricasRagasResponse,
+    summary="EP-RAGAS: Ver métricas RAGAS promedio del documento",
+)
+async def ver_metricas(documento_id: str):
+    """
+    Lee los scores RAGAS ya calculados en cada Cita y retorna
+    los promedios del documento.
+    """
+    query = """
+    MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
+    WHERE c.faithfulness IS NOT NULL
+    RETURN
+      avg(c.faithfulness)       AS faithfulness_promedio,
+      avg(c.answer_relevancy)   AS answer_relevancy_promedio,
+      avg(c.context_precision)  AS context_precision_promedio,
+      avg(c.context_recall)     AS context_recall_promedio,
+      avg(c.answer_correctness) AS answer_correctness_promedio,
+      count(c)                  AS total_citas_evaluadas
+    """
+    try:
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            registro = session.run(query, doc_id=documento_id).single()
+
+        total = registro["total_citas_evaluadas"] if registro else 0
+        if total == 0:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "codigo": "METRICAS_NO_ENCONTRADAS",
+                    "mensaje": "No hay métricas RAGAS calculadas para este documento.",
+                    "accion_sugerida": "Ejecuta primero POST /auditoria/{documento_id}/evaluar-ragas.",
+                },
+            )
+
+        def _redondear(v):
+            return round(float(v), 3) if v is not None else None
+
+        return MetricasRagasResponse(
+            total_evaluadas=total,
+            faithfulness_promedio=_redondear(registro["faithfulness_promedio"]),
+            answer_relevancy_promedio=_redondear(registro["answer_relevancy_promedio"]),
+            context_precision_promedio=_redondear(registro["context_precision_promedio"]),
+            context_recall_promedio=_redondear(registro["context_recall_promedio"]),
+            answer_correctness_promedio=_redondear(registro["answer_correctness_promedio"]),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("error_ver_metricas", doc_id=documento_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"codigo": "ERROR_INTERNO", "mensaje": str(e),
+                    "accion_sugerida": "Intenta nuevamente."},
+        )
+
+
+# ── EP-RAGAS: Exportar scores individuales a Excel ──────────────────────────
+
+@router.get(
+    "/{documento_id}/metricas/exportar",
+    summary="EP-RAGAS: Exportar scores RAGAS individuales por cita a Excel",
+)
+async def exportar_metricas_excel(documento_id: str):
+    """
+    Genera y descarga un archivo Excel con los scores RAGAS
+    de cada cita que fue evaluada (tiene c.faithfulness IS NOT NULL).
+    """
+    query = """
+    MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
+    WHERE c.faithfulness IS NOT NULL
+    RETURN
+      c.texto              AS texto_cita,
+      c.pagina             AS pagina,
+      c.veredicto          AS veredicto,
+      c.faithfulness       AS faithfulness,
+      c.answer_relevancy   AS answer_relevancy,
+      c.context_precision  AS context_precision,
+      c.context_recall     AS context_recall,
+      c.answer_correctness AS answer_correctness
+    ORDER BY c.pagina
+    """
+    try:
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            registros = list(session.run(query, doc_id=documento_id))
+
+        if not registros:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "codigo": "METRICAS_NO_ENCONTRADAS",
+                    "mensaje": "No hay scores RAGAS calculados para exportar.",
+                    "accion_sugerida": "Ejecuta primero POST /auditoria/{documento_id}/evaluar-ragas.",
+                },
+            )
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "RAGAS Scores"
+
+        encabezados = [
+            "Cita", "Página", "Veredicto",
+            "Faithfulness", "Answer Relevancy",
+            "Context Precision", "Context Recall", "Answer Correctness",
+        ]
+
+        header_fill = PatternFill("solid", fgColor="1E293B")
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        for col_idx, titulo in enumerate(encabezados, start=1):
+            celda = ws.cell(row=1, column=col_idx, value=titulo)
+            celda.fill = header_fill
+            celda.font = header_font
+            celda.alignment = header_alignment
+
+        ws.row_dimensions[1].height = 30
+
+        def _redondear(v):
+            return round(float(v), 3) if v is not None else None
+
+        for fila_idx, reg in enumerate(registros, start=2):
+            ws.cell(row=fila_idx, column=1, value=reg["texto_cita"] or "")
+            ws.cell(row=fila_idx, column=2, value=reg["pagina"] or 0)
+            ws.cell(row=fila_idx, column=3, value=reg["veredicto"] or "")
+            ws.cell(row=fila_idx, column=4, value=_redondear(reg["faithfulness"]))
+            ws.cell(row=fila_idx, column=5, value=_redondear(reg["answer_relevancy"]))
+            ws.cell(row=fila_idx, column=6, value=_redondear(reg["context_precision"]))
+            ws.cell(row=fila_idx, column=7, value=_redondear(reg["context_recall"]))
+            ws.cell(row=fila_idx, column=8, value=_redondear(reg["answer_correctness"]))
+
+            # Color de fondo por veredicto
+            veredicto = reg["veredicto"] or ""
+            if veredicto == "VÁLIDA":
+                row_fill = PatternFill("solid", fgColor="D1FAE5")
+            elif veredicto == "DUDOSA":
+                row_fill = PatternFill("solid", fgColor="FEF3C7")
+            elif veredicto == "ALUCINADA":
+                row_fill = PatternFill("solid", fgColor="FEE2E2")
+            else:
+                row_fill = None
+
+            if row_fill:
+                for col_idx in range(1, 9):
+                    ws.cell(row=fila_idx, column=col_idx).fill = row_fill
+
+        # Ancho de columnas
+        ws.column_dimensions["A"].width = 55
+        ws.column_dimensions["B"].width = 8
+        ws.column_dimensions["C"].width = 16
+        for col_letter in ("D", "E", "F", "G", "H"):
+            ws.column_dimensions[col_letter].width = 18
+
+        ws.freeze_panes = "A2"
+
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+
+        filename = f"ragas_{documento_id}.xlsx"
+        headers = {"Content-Disposition": f"attachment; filename={filename}"}
+
+        logger.info("exportar_metricas_excel", doc_id=documento_id, total=len(registros))
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=headers,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("error_exportar_metricas", doc_id=documento_id, error=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail={"codigo": "ERROR_INTERNO", "mensaje": str(e),
+                    "accion_sugerida": "Intenta nuevamente."},
+        )
