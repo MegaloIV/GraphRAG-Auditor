@@ -5,3 +5,7 @@ backend/data/
 backend/data/uploads/*.md
 backend/logs/
 *.log
+node_modules/
+dist/
+pycache__/
+__pycache__/

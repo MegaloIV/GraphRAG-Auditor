@@ -79,4 +79,6 @@ export const auditoriaAPI = {
     client.post(`/auditoria/${documentoId}/evaluar-ragas`, null, { timeout: AUDITORIA_TIMEOUT }),
   verMetricas: (documentoId) =>
     client.get(`/auditoria/${documentoId}/metricas`, { timeout: AUDITORIA_TIMEOUT }),
+  exportarMetricasExcel: (documentoId) =>
+    client.get(`/auditoria/${documentoId}/metricas/exportar`, { responseType: 'blob' }),
 }

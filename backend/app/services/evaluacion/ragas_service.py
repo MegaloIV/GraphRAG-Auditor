@@ -52,6 +52,7 @@ class RagasService:
                 "answer":    [respuesta],
                 "contexts":  [contextos],
                 "reference": [referencia],
+                "ground_truth": [referencia],  # ← agrega esta línea
             }
             dataset = Dataset.from_dict(data)
             resultado = evaluate(

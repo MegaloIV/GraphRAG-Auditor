@@ -1,6 +1,17 @@
 import { useState } from 'react'
 import { auditoriaAPI } from '../../api/client'
 
+function descargarBlob(blob, nombre) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = nombre
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 const METRICAS = [
   { key: 'faithfulness_promedio',       label: 'Faithfulness'       },
   { key: 'answer_relevancy_promedio',   label: 'Answer Relevancy'   },
@@ -17,8 +28,22 @@ function colorScore(valor) {
 }
 
 export default function MetricasRagas({ documentoId, metricas, onMetricasActualizadas }) {
-  const [evaluando, setEvaluando] = useState(false)
-  const [error, setError]         = useState(null)
+  const [evaluando, setEvaluando]     = useState(false)
+  const [descargando, setDescargando] = useState(false)
+  const [error, setError]             = useState(null)
+
+  const descargarExcel = async () => {
+    setDescargando(true)
+    setError(null)
+    try {
+      const res = await auditoriaAPI.exportarMetricasExcel(documentoId)
+      descargarBlob(res.data, `ragas_${documentoId}.xlsx`)
+    } catch {
+      setError('No se pudo descargar el Excel. Verifica que haya métricas calculadas.')
+    } finally {
+      setDescargando(false)
+    }
+  }
 
   const evaluar = async () => {
     setEvaluando(true)
@@ -174,25 +199,55 @@ export default function MetricasRagas({ documentoId, metricas, onMetricasActuali
         })}
       </div>
 
-      <button
-        onClick={evaluar}
-        disabled={evaluando}
-        style={{
-          marginTop: '1.25rem',
-          padding: '0.5rem 1rem',
-          borderRadius: 'var(--radius-md)',
-          border: '1px solid var(--border)',
-          background: 'transparent',
-          color: 'var(--text-secondary)',
-          fontSize: '0.8rem',
-          fontWeight: 500,
-          cursor: evaluando ? 'not-allowed' : 'pointer',
-          fontFamily: 'var(--font-sans)',
-          opacity: evaluando ? 0.5 : 1,
-        }}
-      >
-        {evaluando ? 'Re-evaluando...' : 'Volver a evaluar'}
-      </button>
+      <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.25rem', flexWrap: 'wrap' }}>
+        <button
+          onClick={evaluar}
+          disabled={evaluando || descargando}
+          style={{
+            padding: '0.5rem 1rem',
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid var(--border)',
+            background: 'transparent',
+            color: 'var(--text-secondary)',
+            fontSize: '0.8rem',
+            fontWeight: 500,
+            cursor: (evaluando || descargando) ? 'not-allowed' : 'pointer',
+            fontFamily: 'var(--font-sans)',
+            opacity: (evaluando || descargando) ? 0.5 : 1,
+          }}
+        >
+          {evaluando ? 'Re-evaluando...' : 'Volver a evaluar'}
+        </button>
+
+        {metricas.total_evaluadas > 0 && (
+          <button
+            onClick={descargarExcel}
+            disabled={descargando || evaluando}
+            style={{
+              padding: '0.5rem 1rem',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--border)',
+              background: 'transparent',
+              color: 'var(--text-secondary)',
+              fontSize: '0.8rem',
+              fontWeight: 500,
+              cursor: (descargando || evaluando) ? 'not-allowed' : 'pointer',
+              fontFamily: 'var(--font-sans)',
+              opacity: (descargando || evaluando) ? 0.5 : 1,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.4rem',
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            {descargando ? 'Descargando...' : 'Descargar Excel'}
+          </button>
+        )}
+      </div>
 
       {error && (
         <div style={{
