@@ -9,6 +9,7 @@ import EstadoMotor from '../components/recuperacion/EstadoMotor'
 import ListaVeredictos from '../components/auditoria/ListaVeredictos'
 import AlertasInconsistencias from '../components/auditoria/AlertasInconsistencias'
 import AlertasAlucinaciones from '../components/auditoria/AlertasAlucinaciones'
+import MetricasRagas from '../components/auditoria/MetricasRagas'
 import { grafoAPI, recuperacionAPI, auditoriaAPI } from '../api/client'
 
 const TABS = [
@@ -19,6 +20,7 @@ const TABS = [
   { id: 'motor',         label: 'Motor',       icono: '🔍' },
   { id: 'veredictos',    label: 'Veredictos',  icono: '✓'  },
   { id: 'alertas',       label: 'Alertas',     icono: '⚠️' },
+  { id: 'ragas',         label: 'RAGAS',       icono: '📊' },
 ]
 
 export default function PaginaAuditoria({ documentoId, onVolver }) {
@@ -48,6 +50,7 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
   const [alertas, setAlertas]               = useState(null)
   const [alertasAlucinacion, setAlertasAlucinacion] = useState(null)
   const [errorAuditoria, setErrorAuditoria] = useState(null)
+  const [metricasRagas, setMetricasRagas]   = useState(null)
 
   // ── SSE + carga inicial ──────────────────────────────────
   useEffect(() => {
@@ -79,6 +82,14 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
         setAlertasAlucinacion(alucinRes.data)
       } catch {
         // No hay veredictos aún — es normal
+      }
+
+      // Si ya hay métricas RAGAS calculadas, cargarlas
+      try {
+        const metRes = await auditoriaAPI.verMetricas(documentoId)
+        setMetricasRagas(metRes.data)
+      } catch {
+        // No hay métricas RAGAS aún — es normal
       }
     }
 
@@ -142,7 +153,7 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
   const tabDeshabilitada = (tabId) => {
     if (tabId === 'progreso') return false
     if (!pipelineDone) return true
-    if (['veredictos', 'alertas'].includes(tabId) && !auditoriaDone) return true
+    if (['veredictos', 'alertas', 'ragas'].includes(tabId) && !auditoriaDone) return true
     return false
   }
 
@@ -332,6 +343,20 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
               </Card>
             )}
           </>
+        )}
+
+        {tabActiva === 'ragas' && auditoriaDone && (
+          <Card
+            titulo="Métricas RAGAS"
+            subtitulo="Evaluación semántica de la auditoría"
+            icono="📊"
+          >
+            <MetricasRagas
+              documentoId={documentoId}
+              metricas={metricasRagas}
+              onMetricasActualizadas={setMetricasRagas}
+            />
+          </Card>
         )}
 
         {/* Spinner genérico para tabs cargando */}

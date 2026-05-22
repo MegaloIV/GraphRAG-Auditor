@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 *)",
+      "Bash(mkdir -p /mnt/c/Matias/Repositorios/GraphRAG-Auditor/backend/app/services/evaluacion)",
+      "Bash(touch /mnt/c/Matias/Repositorios/GraphRAG-Auditor/backend/app/services/evaluacion/__init__.py)",
+      "Bash(pip show *)",
+      "Bash(pip3 show *)",
+      "Bash(awk '/def _auditar_cita/,/def _llamar_llm/' /mnt/c/Matias/Repositorios/GraphRAG-Auditor/backend/app/services/auditoria/auditoria_service.py)",
+      "Bash(xxd)"
+    ]
+  }
+}
