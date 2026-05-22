@@ -38,6 +38,9 @@ _RE_INICIO_ANEXOS = re.compile(
 # Only used after the 70% position threshold to avoid false positives in the body.
 _RE_ANEXO_NUMERADO = re.compile(r'^Anexo\s+\d+[\.\:]', re.MULTILINE)
 
+# Sentence boundary: after .!? followed by whitespace and a Spanish/latin uppercase letter.
+_RE_ORACION_FRASE = re.compile(r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])')
+
 SYSTEM_REFERENCIAS = """Eres un extractor de referencias bibliográficas APA 7ma edición.
 Extrae CADA referencia como un objeto JSON separado, uno por línea.
 NO uses array. Cada línea debe ser un JSON válido independiente.
@@ -127,7 +130,7 @@ class EntidadExtractionService:
         if not texto_referencias.strip():
             return []
 
-        bloques = self._dividir_texto(texto_referencias, max_chars=8000)
+        bloques = self._dividir_en_bloques(texto_referencias)
         todas: list[ReferenciaAPA] = []
 
         for i, bloque in enumerate(bloques):
@@ -174,7 +177,7 @@ class EntidadExtractionService:
             logger.info("no_se_encontraron_citas_con_regex")
             return []
 
-        bloques = self._dividir_texto(texto_cuerpo, max_chars=8000)
+        bloques = self._dividir_en_bloques(texto_cuerpo)
         todas: list[CitaEnTexto] = []
 
         for i, bloque in enumerate(bloques):
@@ -217,6 +220,15 @@ class EntidadExtractionService:
                     ))
             except Exception as e:
                 logger.error("error_extraccion_citas", bloque=i, error=str(e))
+
+        vistas: set[tuple] = set()
+        dedup: list[CitaEnTexto] = []
+        for c in todas:
+            key = (c.texto_cita, c.pagina)
+            if key not in vistas:
+                vistas.add(key)
+                dedup.append(c)
+        todas = dedup
 
         logger.info("citas_detectadas_detalle", citas=[c.texto_cita for c in todas])
         logger.info("fragmentos_extraidos", fragmentos=[c.fragmento_oracion[:50] if c.fragmento_oracion else "VACÍO" for c in todas])
@@ -286,27 +298,48 @@ class EntidadExtractionService:
         return list(encontradas)
 
     @staticmethod
-    def _dividir_texto(texto: str, max_chars: int) -> list[str]:
-        if len(texto) <= max_chars:
-            return [texto]
+    def _dividir_en_bloques(texto: str, max_chars: int = 7000) -> list[str]:
+        parrafos = [p.strip() for p in texto.split("\n\n") if p.strip()]
+        logger.info("parrafos_detectados", total=len(parrafos))
 
-        bloques = []
-        inicio = 0
-        while inicio < len(texto):
-            fin = inicio + max_chars
-            if fin < len(texto):
-                corte = texto.rfind("\n\n", inicio, fin)
-                if corte == -1:
-                    corte = texto.rfind("\n", inicio, fin)
-                if corte == -1:
-                    corte = fin
-                else:
-                    corte += 1
+        bloques: list[str] = []
+        grupo: list[str] = []
+        chars_grupo: int = 0
+
+        for parrafo in parrafos:
+            if len(parrafo) > max_chars:
+                if grupo:
+                    bloques.append("\n\n".join(grupo))
+                    grupo = []
+                    chars_grupo = 0
+                partes = _RE_ORACION_FRASE.split(parrafo)
+                sub: list[str] = []
+                chars_sub = 0
+                for parte in partes:
+                    costo = (1 if sub else 0) + len(parte)
+                    if sub and chars_sub + costo > max_chars:
+                        bloques.append(" ".join(sub))
+                        sub = [parte]
+                        chars_sub = len(parte)
+                    else:
+                        sub.append(parte)
+                        chars_sub += costo
+                if sub:
+                    bloques.append(" ".join(sub))
             else:
-                corte = len(texto)
-            bloques.append(texto[inicio:corte].strip())
-            inicio = corte
+                costo = (2 if grupo else 0) + len(parrafo)
+                if grupo and chars_grupo + costo > max_chars:
+                    bloques.append("\n\n".join(grupo))
+                    grupo = [parrafo]
+                    chars_grupo = len(parrafo)
+                else:
+                    grupo.append(parrafo)
+                    chars_grupo += costo
 
+        if grupo:
+            bloques.append("\n\n".join(grupo))
+
+        logger.info("bloques_generados", total=len(bloques))
         return [b for b in bloques if b]
 
     @staticmethod
