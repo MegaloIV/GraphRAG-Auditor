@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     neo4j_password: str = ""
     neo4j_database: str = "neo4j"
 
+    # Supabase (pgvector)
+    supabase_db_host: str = ""
+    supabase_db_port: int = 5432
+    supabase_db_name: str = "postgres"
+    supabase_db_user: str = "postgres"
+    supabase_db_password: str = ""
+
     # Ingesta
     max_pdf_size_mb: int = 10
     upload_dir: str = "./data/uploads"

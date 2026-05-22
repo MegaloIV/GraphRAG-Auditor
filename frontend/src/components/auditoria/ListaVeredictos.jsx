@@ -295,6 +295,15 @@ export default function ListaVeredictos({
                               DOI: {v.doi_referencia}
                             </span>
                           )}
+                          {v.pagina_paper != null && (
+                            <span style={{
+                              fontSize: '0.7rem',
+                              color: 'var(--text-muted)',
+                              fontFamily: 'var(--font-mono)',
+                            }}>
+                              p. {v.pagina_paper}
+                            </span>
+                          )}
                         </div>
                       </div>
                     )}

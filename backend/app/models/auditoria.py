@@ -26,6 +26,7 @@ class VeredictoAuditoria(BaseModel):
     autores_referencia: list[str] = Field(default_factory=list)
     anio_referencia: Optional[int] = None
     metodo_recuperacion: str = ""
+    pagina_paper: Optional[int] = None
 
 
 # HU-010: Respuesta completa de auditoría del documento

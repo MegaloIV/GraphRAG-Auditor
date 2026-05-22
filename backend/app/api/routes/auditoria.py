@@ -110,6 +110,7 @@ async def ver_veredictos(documento_id: str):
       c.pagina        AS pagina,
       c.veredicto     AS veredicto,
       c.justificacion AS justificacion,
+      c.pagina_paper  AS pagina_paper,
       r.id            AS ref_id,
       r.titulo_oficial AS ref_titulo_oficial,
       r.titulo        AS ref_titulo,
@@ -150,6 +151,7 @@ async def ver_veredictos(documento_id: str):
                 anio_referencia=r["ref_anio"],
                 doi_referencia=r["doi"],
                 autores_referencia=r["autores"] or [],
+                pagina_paper=r.get("pagina_paper"),
             ))
 
         validas         = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.VALIDA)

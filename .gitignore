@@ -2,7 +2,6 @@
 .env
 Keys/
 backend/data/
-backend/data/chromadb/
 backend/data/uploads/*.md
 backend/logs/
 *.log

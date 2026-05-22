@@ -2,6 +2,11 @@
 
 Sistema de auditoría semántica de documentos académicos que utiliza tecnología GraphRAG (Graph Retrieval-Augmented Generation) para validar consistencia entre citas, referencias bibliográficas y contenido. Detecta alucinaciones semánticas y distorsiones de información, asegurando que las referencias académicas mantengan fidelidad al contenido original.
 
+> **Nota:** El almacenamiento vectorial de embeddings de papers migró de ChromaDB
+> a **Supabase + pgvector**. ChromaDB ya no es una dependencia del proyecto.
+> Antes de levantar el backend ejecuta el script `scripts/crear_tabla_papers.sql`
+> en tu proyecto de Supabase y configura las variables `SUPABASE_DB_*` en el `.env`.
+
 ## Descripción General
 
 GraphRAG-Auditor automatiza el proceso de auditoría académica mediante:

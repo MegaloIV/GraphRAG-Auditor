@@ -13,6 +13,7 @@ Veredictos:
   NO_VERIFICABLE → el sistema no encontró fragmento ni nodo para verificar
 """
 import structlog
+from typing import Optional
 
 from app.core.config import get_settings
 from app.services.grafo.neo4j_service import neo4j_service
@@ -76,7 +77,8 @@ _Q_GUARDAR_VEREDICTO = """
 MATCH (c:Cita {id: $cita_id})
 SET c.veredicto         = $veredicto,
     c.justificacion     = $justificacion,
-    c.auditado_en       = datetime()
+    c.auditado_en       = datetime(),
+    c.pagina_paper      = $pagina_paper
 """
 
 
@@ -124,8 +126,6 @@ class AuditoriaService:
                 autores=autores,
             )
             veredictos.append(veredicto)
-
-            self._persistir_veredicto(veredicto)
 
         logger.info(
             "auditoria_completada",
@@ -218,22 +218,35 @@ class AuditoriaService:
         autores: list[str] = [],
     ) -> VeredictoAuditoria:
         if not ref_id:
-            return VeredictoAuditoria(
+            veredicto = VeredictoAuditoria(
                 cita_id=cita_id,
                 texto_cita=texto_cita,
                 pagina=pagina,
                 veredicto=VeredictoTipo.NO_VERIFICABLE,
                 justificacion="No se encontró una referencia bibliográfica vinculada a esta cita.",
                 metodo_recuperacion="no_encontrado",
+                pagina_paper=None,
             )
+            self._persistir_veredicto(veredicto, pagina_paper=None)
+            return veredicto
 
         resultado = recuperacion_service.consultar_cita(
             documento_id=documento_id,
             cita_id=cita_id,
         )
 
+        pagina_paper = resultado.pagina_paper
+
+        logger.debug(
+            "cita_auditada_chunk",
+            cita_id=cita_id,
+            pagina_paper=pagina_paper,
+            chunk_index=resultado.chunk_index,
+            similitud=resultado.similitud,
+        )
+
         if resultado.metodo in ("no_encontrado", "solo_grafo") or not resultado.fragmento_relevante:
-            return VeredictoAuditoria(
+            veredicto = VeredictoAuditoria(
                 cita_id=cita_id,
                 texto_cita=texto_cita,
                 pagina=pagina,
@@ -248,7 +261,10 @@ class AuditoriaService:
                 doi_referencia=resultado.doi_referencia,
                 autores_referencia=autores,
                 metodo_recuperacion=resultado.metodo,
+                pagina_paper=pagina_paper,
             )
+            self._persistir_veredicto(veredicto, pagina_paper=pagina_paper)
+            return veredicto
 
         veredicto_tipo, justificacion = self._llamar_llm(
             texto_cita=texto_cita,
@@ -256,7 +272,7 @@ class AuditoriaService:
             fragmento=resultado.fragmento_relevante,
         )
 
-        return VeredictoAuditoria(
+        veredicto = VeredictoAuditoria(
             cita_id=cita_id,
             texto_cita=texto_cita,
             fragmento_oracion=fragmento_oracion,
@@ -271,7 +287,10 @@ class AuditoriaService:
             doi_referencia=resultado.doi_referencia,
             autores_referencia=autores,
             metodo_recuperacion=resultado.metodo,
+            pagina_paper=pagina_paper,
         )
+        self._persistir_veredicto(veredicto, pagina_paper=pagina_paper)
+        return veredicto
 
     def _llamar_llm(self, texto_cita: str, fragmento_oracion: str, fragmento: str) -> tuple[VeredictoTipo, str]:
         """
@@ -328,7 +347,11 @@ class AuditoriaService:
 
         return veredicto_tipo, justificacion
 
-    def _persistir_veredicto(self, veredicto: VeredictoAuditoria) -> None:
+    def _persistir_veredicto(
+        self,
+        veredicto: VeredictoAuditoria,
+        pagina_paper: Optional[int] = None,
+    ) -> None:
         """Guarda el veredicto en el nodo Cita de Neo4j."""
         try:
             with neo4j_service.driver.session(database=settings.neo4j_database) as session:
@@ -337,6 +360,7 @@ class AuditoriaService:
                     cita_id=veredicto.cita_id,
                     veredicto=veredicto.veredicto.value,
                     justificacion=veredicto.justificacion,
+                    pagina_paper=pagina_paper,
                 )
         except Exception as e:
             logger.error("error_persistiendo_veredicto", cita_id=veredicto.cita_id, error=str(e))

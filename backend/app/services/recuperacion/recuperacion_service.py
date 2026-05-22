@@ -3,7 +3,7 @@ EP-003: Motor de Recuperación Híbrida (GraphRAG)
 
 Flujo por cita:
   1. Neo4j: cita → CITA_A → referencia → DOI
-  2. ChromaDB: buscar chunks del paper de ese DOI similares al texto de la cita
+  2. Supabase/pgvector: buscar chunks del paper de ese DOI similares al texto de la cita
   3. Retornar: fragmento más similar + nodos del grafo vinculados
 
 HU-007: indicador de preparación (total chunks indexados para el doc)
@@ -17,6 +17,7 @@ from typing import Optional
 from app.core.config import get_settings
 from app.services.grafo.neo4j_service import neo4j_service
 from app.services.externo.embedding_service import embedding_service
+from app.services.vectorstore.supabase_service import supabase_vector_service
 
 settings = get_settings()
 
@@ -43,6 +44,8 @@ class ResultadoRecuperacion:
     doi_referencia: Optional[str]
     referencia_id: Optional[str]
     metodo: str                    # "hibrido" | "solo_grafo" | "solo_vectorial" | "no_encontrado"
+    pagina_paper: Optional[int] = None   # página del chunk recuperado (None si indexado sin chunks)
+    chunk_index: Optional[int] = None    # índice 0-based del chunk recuperado
 
 
 @dataclass
@@ -99,7 +102,7 @@ class RecuperacionService:
         - Hay citas vinculadas a referencias en Neo4j
         """
         try:
-            total_chunks = embedding_service.total_papers_indexados()
+            total_chunks = supabase_vector_service.total_chunks()
 
             with neo4j_service.driver.session(database=settings.neo4j_database) as session:
                 vinculadas = session.run(
@@ -191,25 +194,41 @@ class RecuperacionService:
             confianza=confianza,
         )
 
-        # Paso 3: búsqueda vectorial en ChromaDB (solo si hay DOI)
+        # Paso 3: búsqueda vectorial en Supabase (solo si hay DOI)
         if doi and texto_cita:
-            fragmentos = embedding_service.buscar_similares(
-                texto_consulta=texto_cita,
-                n_resultados=n_fragmentos,
-                filtro_doi=doi,
+            doi_normalizado = doi.replace("/", "_").replace(".", "_")
+            embedding_vec = embedding_service.modelo.encode(texto_cita).tolist()
+            fragmentos = supabase_vector_service.buscar_similares(
+                embedding=embedding_vec,
+                doi_normalizado=doi_normalizado,
+                top_k=n_fragmentos,
             )
 
             if fragmentos:
                 mejor = fragmentos[0]
+                pagina_paper = mejor.get("pagina")
+                chunk_index  = mejor.get("chunk_index")
+
+                logger.debug(
+                    "chunk_recuperado",
+                    cita_id=cita_id,
+                    doi=doi,
+                    pagina_paper=pagina_paper,
+                    chunk_index=chunk_index,
+                    similitud=mejor["similitud"],
+                )
+
                 return ResultadoRecuperacion(
                     cita_id=cita_id,
                     texto_cita=texto_cita,
-                    fragmento_relevante=mejor["texto"],
-                    similitud=mejor["similitud"],
+                    fragmento_relevante=mejor["contenido"],
+                    similitud=float(mejor["similitud"]),
                     nodos_grafo=nodos,
                     doi_referencia=doi,
                     referencia_id=ref_id,
                     metodo="hibrido",
+                    pagina_paper=pagina_paper,
+                    chunk_index=chunk_index,
                 )
 
         # Fallback: solo grafo (no hay chunks de ese paper en ChromaDB)
@@ -255,21 +274,23 @@ class RecuperacionService:
         if not citas_raw:
             return []
 
-        # Buscar en ChromaDB sin filtro de DOI
-        fragmentos_globales = embedding_service.buscar_similares(
-            texto_consulta=texto_consulta,
-            n_resultados=n_resultados,
+        # Buscar en Supabase sin filtro de DOI (búsqueda global)
+        embedding_vec = embedding_service.modelo.encode(texto_consulta).tolist()
+        fragmentos_globales = supabase_vector_service.buscar_similares(
+            embedding=embedding_vec,
+            doi_normalizado=None,
+            top_k=n_resultados,
         )
 
         if not fragmentos_globales:
             return []
 
-        # Cruzar fragmentos con citas del documento por similitud textual
+        # Cruzar fragmentos con citas del documento por DOI
         resultados = []
         dois_vistos = set()
 
         for fragmento in fragmentos_globales:
-            doi_frag = fragmento["metadata"].get("doi") or fragmento["metadata"].get("doi_normalizado")
+            doi_frag = fragmento.get("doi")
             if doi_frag in dois_vistos:
                 continue
             dois_vistos.add(doi_frag)
@@ -278,20 +299,22 @@ class RecuperacionService:
             cita_match = self._cita_por_doi(documento_id, doi_frag)
             if cita_match:
                 resultado = self.consultar_cita(documento_id, cita_match)
-                resultado.fragmento_relevante = fragmento["texto"]
-                resultado.similitud = fragmento["similitud"]
+                resultado.fragmento_relevante = fragmento["contenido"]
+                resultado.similitud = float(fragmento["similitud"])
                 resultados.append(resultado)
             else:
                 # Crear resultado solo vectorial sin cita vinculada
                 resultados.append(ResultadoRecuperacion(
                     cita_id="",
                     texto_cita=texto_consulta,
-                    fragmento_relevante=fragmento["texto"],
-                    similitud=fragmento["similitud"],
+                    fragmento_relevante=fragmento["contenido"],
+                    similitud=float(fragmento["similitud"]),
                     nodos_grafo=[],
                     doi_referencia=doi_frag,
                     referencia_id=None,
                     metodo="solo_vectorial",
+                    pagina_paper=fragmento.get("pagina"),
+                    chunk_index=fragmento.get("chunk_index"),
                 ))
 
         return resultados
