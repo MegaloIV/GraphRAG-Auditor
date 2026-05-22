@@ -2,7 +2,10 @@
 .env
 Keys/
 backend/data/
-backend/data/chromadb/
 backend/data/uploads/*.md
 backend/logs/
 *.log
+node_modules/
+dist/
+pycache__/
+__pycache__/

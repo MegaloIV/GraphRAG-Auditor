@@ -63,13 +63,22 @@ export const recuperacionAPI = {
 }
 
 // ── Auditoría (EP-004) ───────────────────────────────────
+// Timeout extendido a 10 min: auditoría + RAGAS llaman al LLM por cada cita.
+const AUDITORIA_TIMEOUT = 600000
+
 export const auditoriaAPI = {
   auditar: (documentoId) =>
-    client.post(`/auditoria/${documentoId}/auditar`),
+    client.post(`/auditoria/${documentoId}/auditar`, null, { timeout: AUDITORIA_TIMEOUT }),
   verVeredictos: (documentoId) =>
-    client.get(`/auditoria/${documentoId}/veredictos`),
+    client.get(`/auditoria/${documentoId}/veredictos`, { timeout: AUDITORIA_TIMEOUT }),
   verAlertas: (documentoId) =>
-    client.get(`/auditoria/${documentoId}/alertas`),
+    client.get(`/auditoria/${documentoId}/alertas`, { timeout: AUDITORIA_TIMEOUT }),
   verAlertasAlucinaciones: (documentoId) =>
-    client.get(`/auditoria/${documentoId}/alertas/alucinaciones`),
+    client.get(`/auditoria/${documentoId}/alertas/alucinaciones`, { timeout: AUDITORIA_TIMEOUT }),
+  evaluarRagas: (documentoId) =>
+    client.post(`/auditoria/${documentoId}/evaluar-ragas`, null, { timeout: AUDITORIA_TIMEOUT }),
+  verMetricas: (documentoId) =>
+    client.get(`/auditoria/${documentoId}/metricas`, { timeout: AUDITORIA_TIMEOUT }),
+  exportarMetricasExcel: (documentoId) =>
+    client.get(`/auditoria/${documentoId}/metricas/exportar`, { responseType: 'blob' }),
 }

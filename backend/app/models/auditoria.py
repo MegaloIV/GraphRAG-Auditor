@@ -26,6 +26,22 @@ class VeredictoAuditoria(BaseModel):
     autores_referencia: list[str] = Field(default_factory=list)
     anio_referencia: Optional[int] = None
     metodo_recuperacion: str = ""
+    pagina_paper: Optional[int] = None
+    faithfulness:       Optional[float] = None
+    answer_relevancy:   Optional[float] = None
+    context_precision:  Optional[float] = None
+    context_recall:     Optional[float] = None
+    answer_correctness: Optional[float] = None
+
+
+# EP-RAGAS: Métricas promedio del documento
+class MetricasRagasResponse(BaseModel):
+    total_evaluadas:             int
+    faithfulness_promedio:       Optional[float] = None
+    answer_relevancy_promedio:   Optional[float] = None
+    context_precision_promedio:  Optional[float] = None
+    context_recall_promedio:     Optional[float] = None
+    answer_correctness_promedio: Optional[float] = None
 
 
 # HU-010: Respuesta completa de auditoría del documento

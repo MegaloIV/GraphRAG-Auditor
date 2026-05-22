@@ -16,6 +16,28 @@ const FILTROS = [
   { id: 'NO_VERIFICABLE', label: 'No verificables' },
 ]
 
+const RAGAS_BADGES = [
+  { key: 'faithfulness',       sigla: 'F'  },
+  { key: 'answer_relevancy',   sigla: 'AR' },
+  { key: 'context_precision',  sigla: 'CP' },
+  { key: 'context_recall',     sigla: 'CR' },
+  { key: 'answer_correctness', sigla: 'AC' },
+]
+
+function colorRagas(valor) {
+  if (valor == null) return 'var(--text-muted)'
+  if (valor >= 0.80) return 'var(--success)'
+  if (valor >= 0.60) return 'var(--warning)'
+  return 'var(--error)'
+}
+
+function bgRagas(valor) {
+  if (valor == null) return 'var(--bg-surface)'
+  if (valor >= 0.80) return 'var(--success-subtle)'
+  if (valor >= 0.60) return 'var(--warning-subtle)'
+  return 'var(--error-subtle)'
+}
+
 export default function ListaVeredictos({
   veredictos,
   validas,
@@ -166,6 +188,37 @@ export default function ListaVeredictos({
                     }}>
                       {v.justificacion}
                     </div>
+                    {RAGAS_BADGES.some(b => v[b.key] != null) && (
+                      <div style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: '0.3rem',
+                        marginTop: '0.5rem',
+                      }}>
+                        {RAGAS_BADGES.map(b => {
+                          const val = v[b.key]
+                          if (val == null) return null
+                          return (
+                            <span
+                              key={b.key}
+                              title={b.key}
+                              style={{
+                                padding: '0.15rem 0.45rem',
+                                borderRadius: '999px',
+                                background: bgRagas(val),
+                                color: colorRagas(val),
+                                fontSize: '0.68rem',
+                                fontWeight: 600,
+                                fontFamily: 'var(--font-mono)',
+                                border: `1px solid ${colorRagas(val)}33`,
+                              }}
+                            >
+                              {b.sigla}: {val.toFixed(2)}
+                            </span>
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
 
                   {/* Página + expandir */}
@@ -293,6 +346,15 @@ export default function ListaVeredictos({
                               fontFamily: 'var(--font-mono)',
                             }}>
                               DOI: {v.doi_referencia}
+                            </span>
+                          )}
+                          {v.pagina_paper != null && (
+                            <span style={{
+                              fontSize: '0.7rem',
+                              color: 'var(--text-muted)',
+                              fontFamily: 'var(--font-mono)',
+                            }}>
+                              p. {v.pagina_paper}
                             </span>
                           )}
                         </div>
