@@ -61,7 +61,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
-        "https://graph-rag-auditor-aa748rwyz-megaloivs-projects.vercel.app",
+        "graph-rag-auditor.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
