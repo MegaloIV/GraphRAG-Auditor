@@ -85,7 +85,8 @@ async def ver_citas(documento_id: str):
     try:
         query = """
         MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
-        RETURN c
+        OPTIONAL MATCH (c)-[:CITA_A]->(r:Referencia)
+        RETURN c, r.id AS referencia_id
         """
         citas = []
         with neo4j_service.driver.session() as session:
@@ -99,6 +100,7 @@ async def ver_citas(documento_id: str):
                     tipo=tipo,
                     pagina=c.get("pagina", 0),
                     fragmento_oracion=c.get("fragmento", ""),
+                    referencia_id=record["referencia_id"],
                 ))
 
         parenteticas = sum(1 for c in citas if c.tipo == TipoCita.PARENTETICA)

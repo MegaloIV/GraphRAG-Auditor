@@ -1,18 +1,26 @@
 import BarraProgreso from '../ui/BarraProgreso'
 
-const ETAPAS = [
+const ETAPAS_EXTRACCION = [
   { porcentaje: 10,  label: 'Extrayendo texto del PDF' },
   { porcentaje: 25,  label: 'Analizando estructura' },
   { porcentaje: 40,  label: 'Extrayendo referencias' },
   { porcentaje: 55,  label: 'Detectando citas' },
   { porcentaje: 70,  label: 'Construyendo grafo' },
-  { porcentaje: 78,  label: 'Vinculando citas con referencias' },
-  { porcentaje: 85,  label: 'Verificando en CrossRef' },
-  { porcentaje: 100, label: 'Completado' },
+  { porcentaje: 90,  label: 'Vinculando citas con referencias' },
+  { porcentaje: 100, label: 'Extracción completada' },
 ]
 
-export default function ProgresoAuditoria({ progreso }) {
+const ETAPAS_VERIFICACION = [
+  { porcentaje: 10,  label: 'Buscando referencias vinculadas' },
+  { porcentaje: 30,  label: 'Verificando en CrossRef y Unpaywall' },
+  { porcentaje: 85,  label: 'Indexando fragmentos del paper' },
+  { porcentaje: 100, label: 'Verificación completada' },
+]
+
+export default function ProgresoAuditoria({ progreso, fase = 'extraccion' }) {
   const { porcentaje, mensaje_progreso, estado, citas_encontradas, error } = progreso
+
+  const etapas = fase === 'verificacion' ? ETAPAS_VERIFICACION : ETAPAS_EXTRACCION
 
   return (
     <div style={{ animation: 'fadeIn 0.3s ease forwards' }}>
@@ -33,10 +41,10 @@ export default function ProgresoAuditoria({ progreso }) {
         gap: '0.4rem',
         marginBottom: '1.5rem',
       }}>
-        {ETAPAS.map((etapa, i) => {
+        {etapas.map((etapa, i) => {
           const completada = porcentaje >= etapa.porcentaje
           const activa = porcentaje < etapa.porcentaje &&
-            (i === 0 || porcentaje >= ETAPAS[i - 1].porcentaje)
+            (i === 0 || porcentaje >= etapas[i - 1].porcentaje)
 
           return (
             <div
@@ -104,7 +112,33 @@ export default function ProgresoAuditoria({ progreso }) {
         })}
       </div>
 
-      {/* Completado */}
+      {/* Completado fase extracción */}
+      {estado === 'listo_extraccion' && (
+        <div style={{
+          padding: '1rem',
+          background: 'var(--accent-subtle)',
+          border: '1px solid rgba(59,130,246,0.2)',
+          borderRadius: 'var(--radius-md)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+          animation: 'fadeIn 0.3s ease forwards',
+        }}>
+          <span style={{ fontSize: '1.5rem' }}>📋</span>
+          <div>
+            <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--accent)' }}>
+              Extracción completada
+            </div>
+            {citas_encontradas !== null && (
+              <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                {citas_encontradas} citas detectadas — selecciona cuáles verificar
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Completado total */}
       {estado === 'completado' && (
         <div style={{
           padding: '1rem',
@@ -119,13 +153,11 @@ export default function ProgresoAuditoria({ progreso }) {
           <span style={{ fontSize: '1.5rem' }}>✅</span>
           <div>
             <div style={{ fontSize: '0.9rem', fontWeight: 600, color: 'var(--success)' }}>
-              Pipeline completado
+              Verificación completada
             </div>
-            {citas_encontradas !== null && (
-              <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
-                {citas_encontradas} citas procesadas — listo para auditar
-              </div>
-            )}
+            <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+              Pipeline listo — puedes iniciar la auditoría semántica en la pestaña Motor
+            </div>
           </div>
         </div>
       )}

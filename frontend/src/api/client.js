@@ -37,6 +37,8 @@ export const ingestaAPI = {
     client.get(`/ingesta/${documentoId}/estructura`),
   verProgreso: (documentoId) =>
     client.get(`/ingesta/${documentoId}/progreso`),
+  iniciarVerificacion: (documentoId, citaIds) =>
+    client.post(`/ingesta/${documentoId}/verificar`, { cita_ids: citaIds }),
 }
 
 // ── Grafo ────────────────────────────────────────────────

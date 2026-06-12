@@ -13,6 +13,7 @@ from app.models.ingesta import (
     EstructuraDocumentoResponse,
     ProgresoAuditoriaResponse,
     EstadoIngesta,
+    VerificacionSolicitud,
 )
 from app.services.ingesta.pdf_service import pdf_service, PDFNoProcessableError
 
@@ -20,7 +21,6 @@ logger = structlog.get_logger(__name__)
 settings = get_settings()
 router = APIRouter(prefix="/ingesta", tags=["Ingesta"])
 
-# ── Progreso en disco (sobrevive reinicios) ───────────────
 PROGRESO_DIR = Path("./data/progreso")
 
 
@@ -51,7 +51,7 @@ def _leer_progreso(documento_id: str) -> ProgresoAuditoriaResponse | None:
 )
 async def cargar_pdf(archivo: UploadFile = File(...)):
     """
-    Recibe un PDF, lo valida, guarda y arranca la auditoría automáticamente.
+    Recibe un PDF, lo valida, guarda y arranca la fase 1 del pipeline automáticamente.
     """
     contenido = await archivo.read()
 
@@ -88,15 +88,13 @@ async def cargar_pdf(archivo: UploadFile = File(...)):
 
     logger.info("pdf_cargado", doc_id=documento_id, paginas=num_paginas)
 
-    # Registrar progreso inicial en disco
     _guardar_progreso(ProgresoAuditoriaResponse(
         documento_id=documento_id,
         estado=EstadoIngesta.PROCESANDO,
         porcentaje=0,
-        mensaje_progreso="Iniciando auditoría...",
+        mensaje_progreso="Iniciando extracción...",
     ))
 
-    # Arrancar pipeline en thread del proceso principal
     hilo = threading.Thread(
         target=_ejecutar_pipeline,
         args=(documento_id, ruta_pdf),
@@ -110,8 +108,48 @@ async def cargar_pdf(archivo: UploadFile = File(...)):
         tamano_bytes=len(contenido),
         paginas=num_paginas,
         estado=EstadoIngesta.PROCESANDO,
-        mensaje="Documento recibido. Auditoría iniciada automáticamente.",
+        mensaje="Documento recibido. Extracción iniciada.",
     )
+
+
+@router.post(
+    "/{documento_id}/verificar",
+    summary="HU-VER: Iniciar verificación externa de citas seleccionadas",
+)
+async def iniciar_verificacion(documento_id: str, solicitud: VerificacionSolicitud):
+    """
+    Recibe los IDs de las citas seleccionadas por el usuario, deduce las referencias
+    únicas vinculadas a ellas y arranca la verificación externa (CrossRef + Unpaywall).
+    """
+    progreso = _leer_progreso(documento_id)
+    if not progreso or progreso.estado != EstadoIngesta.LISTO_EXTRACCION:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "codigo": "ESTADO_INVALIDO",
+                "mensaje": "El documento no está listo para verificación.",
+                "accion_sugerida": "Espera a que la extracción termine antes de verificar.",
+            },
+        )
+
+    if not solicitud.cita_ids:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "codigo": "SIN_CITAS",
+                "mensaje": "Debes seleccionar al menos una cita para verificar.",
+                "accion_sugerida": "Selecciona una o más citas en la lista.",
+            },
+        )
+
+    hilo = threading.Thread(
+        target=_ejecutar_verificacion,
+        args=(documento_id, solicitud.cita_ids),
+        daemon=True,
+    )
+    hilo.start()
+
+    return {"mensaje": "Verificación iniciada.", "documento_id": documento_id}
 
 
 @router.get(
@@ -182,7 +220,12 @@ async def ver_progreso(documento_id: str):
                 ticks = 0
                 yield f"data: {progreso.model_dump_json()}\n\n"
 
-            if progreso.estado in (EstadoIngesta.COMPLETADO, EstadoIngesta.ERROR):
+            estados_terminales = (
+                EstadoIngesta.COMPLETADO,
+                EstadoIngesta.ERROR,
+                EstadoIngesta.LISTO_EXTRACCION,
+            )
+            if progreso.estado in estados_terminales:
                 logger.info("sse_finalizado", doc_id=documento_id, estado=progreso.estado)
                 return
 
@@ -201,6 +244,8 @@ async def ver_progreso(documento_id: str):
         },
     )
 
+
+# ── Pipeline fase 1: extracción + grafo ──────────────────────────────────────
 
 def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
     import logging
@@ -236,29 +281,108 @@ def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
         grafo_carga_service.cargar_referencias(documento_id, referencias)
         grafo_carga_service.cargar_citas(documento_id, citas)
 
-        actualizar(78, "Vinculando citas con sus referencias...")
+        actualizar(90, "Vinculando citas con sus referencias...")
         resultado_vinculacion = grafo_carga_service.vincular_citas(documento_id)
         _log.info(f"[pipeline] vinculacion_completada {resultado_vinculacion}")
 
-        actualizar(85, "Verificando referencias en CrossRef...")
-        from app.services.externo.verificacion_service import verificacion_service
-        verificacion_service.verificar_referencias(referencias, documento_id)
+        _guardar_progreso(ProgresoAuditoriaResponse(
+            documento_id=documento_id,
+            estado=EstadoIngesta.LISTO_EXTRACCION,
+            porcentaje=100,
+            mensaje_progreso="Extracción completada. Selecciona las citas a verificar.",
+            citas_encontradas=len(citas),
+        ))
+        _log.info(f"[pipeline] extraccion_completada doc_id={documento_id} citas={len(citas)}")
+
+    except Exception as e:
+        _log.error(f"[pipeline] extraccion_fallida doc_id={documento_id} error={str(e)}", exc_info=True)
+        _guardar_progreso(ProgresoAuditoriaResponse(
+            documento_id=documento_id,
+            estado=EstadoIngesta.ERROR,
+            porcentaje=0,
+            mensaje_progreso="La extracción falló.",
+            error="Ocurrió un error durante el procesamiento. Intenta nuevamente.",
+        ))
+
+
+# ── Pipeline fase 2: verificación externa ────────────────────────────────────
+
+def _ejecutar_verificacion(documento_id: str, cita_ids: list[str]) -> None:
+    import logging
+    from app.services.grafo.neo4j_service import neo4j_service
+    from app.services.externo.verificacion_service import verificacion_service
+    from app.models.grafo import ReferenciaAPA
+
+    _log = logging.getLogger(__name__)
+
+    def actualizar(porcentaje: int, mensaje: str) -> None:
+        _log.info(f"[verificacion] {porcentaje}% — {mensaje}")
+        _guardar_progreso(ProgresoAuditoriaResponse(
+            documento_id=documento_id,
+            estado=EstadoIngesta.VERIFICANDO,
+            porcentaje=porcentaje,
+            mensaje_progreso=mensaje,
+        ))
+
+    try:
+        actualizar(10, "Buscando referencias vinculadas a las citas seleccionadas...")
+
+        # Obtener referencias únicas a partir de las citas seleccionadas
+        query = """
+        MATCH (c:Cita)-[:CITA_A]->(r:Referencia)
+        WHERE c.id IN $cita_ids
+        OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
+        RETURN DISTINCT r, collect(a.nombre) AS autores
+        """
+        referencias_seleccionadas: list[ReferenciaAPA] = []
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            result = session.run(query, cita_ids=cita_ids)
+            for record in result:
+                r = record["r"]
+                referencias_seleccionadas.append(ReferenciaAPA(
+                    referencia_id=r["id"],
+                    autores=record["autores"],
+                    anio=r.get("anio"),
+                    titulo=r.get("titulo", ""),
+                    fuente=r.get("fuente"),
+                    doi=r.get("doi"),
+                    datos_incompletos=r.get("datos_incompletos", False),
+                    campos_faltantes=[],
+                ))
+
+        total = len(referencias_seleccionadas)
+        _log.info(f"[verificacion] referencias_unicas={total} doc_id={documento_id}")
+
+        if total == 0:
+            _guardar_progreso(ProgresoAuditoriaResponse(
+                documento_id=documento_id,
+                estado=EstadoIngesta.COMPLETADO,
+                porcentaje=100,
+                mensaje_progreso="No se encontraron referencias vinculadas. Pipeline completado.",
+            ))
+            return
+
+        actualizar(30, f"Verificando {total} referencia(s) en CrossRef y Unpaywall...")
+        verificacion_service.verificar_referencias(
+            referencias_seleccionadas,
+            documento_id,
+            max_referencias=total,
+        )
 
         _guardar_progreso(ProgresoAuditoriaResponse(
             documento_id=documento_id,
             estado=EstadoIngesta.COMPLETADO,
             porcentaje=100,
-            mensaje_progreso="Auditoría completada exitosamente.",
-            citas_encontradas=len(citas),
+            mensaje_progreso="Verificación completada. Listo para auditar.",
         ))
-        _log.info(f"[pipeline] auditoria_completada doc_id={documento_id} citas={len(citas)}")
+        _log.info(f"[verificacion] completada doc_id={documento_id} refs={total}")
 
     except Exception as e:
-        _log.error(f"[pipeline] auditoria_fallida doc_id={documento_id} error={str(e)}", exc_info=True)
+        _log.error(f"[verificacion] fallida doc_id={documento_id} error={str(e)}", exc_info=True)
         _guardar_progreso(ProgresoAuditoriaResponse(
             documento_id=documento_id,
             estado=EstadoIngesta.ERROR,
             porcentaje=0,
-            mensaje_progreso="La auditoría falló.",
-            error="Ocurrió un error durante el procesamiento. Intenta nuevamente.",
+            mensaje_progreso="La verificación falló.",
+            error="Ocurrió un error durante la verificación. Intenta nuevamente.",
         ))
