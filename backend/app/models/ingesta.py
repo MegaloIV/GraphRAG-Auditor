@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field
 class EstadoIngesta(str, Enum):
     PENDIENTE = "pendiente"
     PROCESANDO = "procesando"
+    LISTO_EXTRACCION = "listo_extraccion"
+    VERIFICANDO = "verificando"
     COMPLETADO = "completado"
     ERROR = "error"
 
@@ -59,6 +61,11 @@ class ProgresoAuditoriaResponse(BaseModel):
     mensaje_progreso: str
     citas_encontradas: Optional[int] = None
     error: Optional[str] = None
+
+
+# HU-VER: Solicitud de verificación externa con referencias seleccionadas
+class VerificacionSolicitud(BaseModel):
+    referencia_ids: list[str]
 
 
 # RN-002: Formato estándar de errores (sin detalles técnicos internos)

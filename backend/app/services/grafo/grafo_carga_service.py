@@ -203,13 +203,14 @@ class GrafoCargaService:
                 ref_id = confianza = metodo = None
 
                 if apellidos and anio:
-                    # Estrategia 1: exacto
+                    # Estrategia 1: apellido exacto + año
                     for ap in apellidos:
                         if (ap, anio) in indice:
                             ref_id, confianza, metodo = indice[(ap, anio)], 0.95, "apellido_anio_exacto"
                             break
 
-                    # Estrategia 2: parcial
+                    # Estrategia 2: apellido parcial + año
+                    # (cubre truncaciones como "Rodríguez" vs "Rodriguez")
                     if not ref_id:
                         for ap in apellidos:
                             for (ap_idx, anio_idx), rid in indice.items():
@@ -219,11 +220,9 @@ class GrafoCargaService:
                             if ref_id:
                                 break
 
-                    # Estrategia 3: solo año
-                    if not ref_id and len(apellidos) == 1:
-                        candidatos = [rid for (_, anio_idx), rid in indice.items() if anio_idx == anio]
-                        if len(candidatos) == 1:
-                            ref_id, confianza, metodo = candidatos[0], 0.50, "solo_anio"
+                    # Estrategia 3 eliminada: enlazar solo por año sin coincidencia de
+                    # apellido generaba falsos positivos (ej. "Zhao et al." → "Wang et al."
+                    # cuando ambos comparten el mismo año y es la única referencia de ese año).
 
                 if ref_id:
                     session.run(

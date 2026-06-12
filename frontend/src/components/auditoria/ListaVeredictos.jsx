@@ -2,26 +2,22 @@ import { useState } from 'react'
 import Badge from '../ui/Badge'
 
 const VARIANTE_VEREDICTO = {
-  'VÁLIDA':         { variante: 'success', icono: '✓' },
-  'DUDOSA':         { variante: 'warning', icono: '~' },
-  'ALUCINADA':      { variante: 'error',   icono: '✕' },
-  'NO_VERIFICABLE': { variante: 'neutral', icono: '?' },
+  'SUPPORTS': { variante: 'success', icono: '✓', label: 'Supports' },
+  'REFUTES':  { variante: 'error',   icono: '✕', label: 'Refutes'  },
+  'NO_INFO':  { variante: 'neutral', icono: '?', label: 'No Info'  },
 }
 
 const FILTROS = [
-  { id: 'todos',          label: 'Todos' },
-  { id: 'VÁLIDA',         label: 'Válidas' },
-  { id: 'DUDOSA',         label: 'Dudosas' },
-  { id: 'ALUCINADA',      label: 'Alucinadas' },
-  { id: 'NO_VERIFICABLE', label: 'No verificables' },
+  { id: 'todos',    label: 'Todos'    },
+  { id: 'SUPPORTS', label: 'Supports' },
+  { id: 'REFUTES',  label: 'Refutes'  },
+  { id: 'NO_INFO',  label: 'No Info'  },
 ]
 
 const RAGAS_BADGES = [
-  { key: 'faithfulness',       sigla: 'F'  },
-  { key: 'answer_relevancy',   sigla: 'AR' },
-  { key: 'context_precision',  sigla: 'CP' },
-  { key: 'context_recall',     sigla: 'CR' },
-  { key: 'answer_correctness', sigla: 'AC' },
+  { key: 'faithfulness',      sigla: 'F'  },
+  { key: 'answer_relevancy',  sigla: 'AR' },
+  { key: 'context_precision', sigla: 'CP' },
 ]
 
 function colorRagas(valor) {
@@ -40,10 +36,9 @@ function bgRagas(valor) {
 
 export default function ListaVeredictos({
   veredictos,
-  validas,
-  dudosas,
-  alucinadas,
-  no_verificables,
+  supports,
+  refutes,
+  no_info,
   advertencia,
 }) {
   const [filtro, setFiltro] = useState('todos')
@@ -59,14 +54,13 @@ export default function ListaVeredictos({
       {/* Resumen */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(4, 1fr)',
+        gridTemplateColumns: 'repeat(3, 1fr)',
         gap: '0.6rem',
         marginBottom: '1.25rem',
       }}>
-        <Chip label="Válidas"         valor={validas}         variante="success" />
-        <Chip label="Dudosas"         valor={dudosas}         variante="warning" />
-        <Chip label="Alucinadas"      valor={alucinadas}      variante="error"   />
-        <Chip label="No verificables" valor={no_verificables} variante="neutral" />
+        <Chip label="Supports" valor={supports} variante="success" />
+        <Chip label="Refutes"  valor={refutes}  variante="error"   />
+        <Chip label="No Info"  valor={no_info}  variante="neutral" />
       </div>
 
       {/* Advertencia */}
@@ -135,7 +129,7 @@ export default function ListaVeredictos({
           </div>
         ) : (
           citasFiltradas.map((v, i) => {
-            const config = VARIANTE_VEREDICTO[v.veredicto] || VARIANTE_VEREDICTO['NO_VERIFICABLE']
+            const config = VARIANTE_VEREDICTO[v.veredicto] || VARIANTE_VEREDICTO['NO_INFO']
             const abierto = expandido === v.cita_id
 
             return (
@@ -164,7 +158,7 @@ export default function ListaVeredictos({
                   {/* Veredicto badge */}
                   <div style={{ flexShrink: 0, marginTop: '2px' }}>
                     <Badge
-                      texto={v.veredicto}
+                      texto={config.label ?? v.veredicto}
                       variante={config.variante}
                       icono={config.icono}
                     />

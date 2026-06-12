@@ -61,6 +61,7 @@ class VerificacionService:
 
             if not resultado["encontrada"]:
                 no_encontradas += 1
+                self._marcar_no_encontrada(referencia.referencia_id)
                 continue
 
             encontradas += 1
@@ -71,16 +72,28 @@ class VerificacionService:
 
             self._actualizar_neo4j(referencia.referencia_id, resultado)
 
+        sin_texto = encontradas - con_abstract - con_texto_completo
         resumen = {
             "total": total,
             "encontradas": encontradas,
             "no_encontradas": no_encontradas,
-            "con_abstract": con_abstract,
             "con_texto_completo": con_texto_completo,
+            "con_abstract_solo": con_abstract,
+            "encontradas_sin_texto": sin_texto,
             "cobertura_porcentaje": round((encontradas / max(total, 1)) * 100, 1),
         }
 
         logger.info("verificacion_completada", **resumen)
+        logger.info(
+            "cobertura_texto_para_auditoria",
+            texto_completo_pct=round((con_texto_completo / max(total, 1)) * 100, 1),
+            solo_abstract_pct=round((con_abstract / max(total, 1)) * 100, 1),
+            sin_texto_pct=round(((no_encontradas + sin_texto) / max(total, 1)) * 100, 1),
+            advertencia=(
+                "Alto porcentaje sin texto completo: la auditoría producirá muchos NO_INFO"
+                if (no_encontradas + sin_texto) / max(total, 1) > 0.5 else None
+            ),
+        )
         return resumen
 
     def _verificar_una_referencia(self, referencia: ReferenciaAPA) -> dict:
@@ -146,6 +159,19 @@ class VerificacionService:
             "score_coincidencia": resultado_crossref.score_coincidencia,
         }
 
+    def _marcar_no_encontrada(self, referencia_id: str) -> None:
+        query = """
+        MATCH (r:Referencia {id: $ref_id})
+        SET r.nivel_confianza = 'no_encontrado',
+            r.verificado = true,
+            r.verificado_en = datetime()
+        """
+        try:
+            with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+                session.run(query, ref_id=referencia_id)
+        except Exception as e:
+            logger.error("error_marcando_no_encontrada", ref_id=referencia_id, error=str(e))
+
     def _actualizar_neo4j(self, referencia_id: str, resultado: dict) -> None:
         """
         Actualiza el nodo Referencia en Neo4j con los resultados
@@ -167,7 +193,7 @@ class VerificacionService:
                     ref_id=referencia_id,
                     doi=resultado.get("doi", ""),
                     titulo_oficial=resultado.get("titulo_oficial", ""),
-                    nivel_confianza=resultado.get("nivel_confianza", "no_encontrado"),
+                    nivel_confianza=resultado.get("nivel_confianza") or "no_encontrado",
                     score=resultado.get("score_coincidencia", 0.0),
                 )
         except Exception as e:

@@ -37,6 +37,8 @@ export const ingestaAPI = {
     client.get(`/ingesta/${documentoId}/estructura`),
   verProgreso: (documentoId) =>
     client.get(`/ingesta/${documentoId}/progreso`),
+  iniciarVerificacion: (documentoId, referenciaIds) =>
+    client.post(`/ingesta/${documentoId}/verificar`, { referencia_ids: referenciaIds }),
 }
 
 // ── Grafo ────────────────────────────────────────────────
@@ -45,8 +47,13 @@ export const grafoAPI = {
     client.get(`/grafo/${documentoId}/referencias`),
   verCitas: (documentoId) =>
     client.get(`/grafo/${documentoId}/citas`),
-  verResumen: (documentoId) =>
-    client.get(`/grafo/${documentoId}/resumen`),
+  verGrafoVisual: (documentoId) =>
+    client.get(`/grafo/${documentoId}/grafo-visual`),
+  subirPaperManual: (documentoId, referenciaId, archivo) => {
+    const form = new FormData()
+    form.append('archivo', archivo)
+    return client.post(`/grafo/${documentoId}/referencias/${referenciaId}/paper`, form, { timeout: 120000 })
+  },
 }
 
 // ── Recuperación (EP-003) ────────────────────────────────

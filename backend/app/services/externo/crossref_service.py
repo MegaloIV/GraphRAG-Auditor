@@ -52,26 +52,45 @@ class CrossRefService:
     ) -> ResultadoCrossRef:
         """
         Busca una referencia en CrossRef por título y autores.
-        Retorna el resultado con mayor score de coincidencia.
+        Paso 1: query con título + primer autor (+ filtro de año si disponible).
+        Paso 2: si el score es bajo, reintenta solo con título sin filtro de año.
         """
-        # Construir query de búsqueda
-        query_parts = [titulo]
-        if autores:
-            # Usar solo el primer autor para la búsqueda
-            query_parts.append(autores[0].split(",")[0])
+        primer_autor = autores[0].split(",")[0] if autores else ""
+        query_completa = f"{titulo} {primer_autor}".strip()
+        query_solo_titulo = titulo
 
-        query = " ".join(query_parts)
-
-        params = {
-            "query": query,
+        params_base = {
             "rows": 3,
             "select": "DOI,title,author,published,abstract,link",
             "mailto": CROSSREF_MAILTO,
         }
 
+        # Paso 1: título + autor (con filtro de año si hay)
+        params1 = {**params_base, "query": query_completa}
         if anio:
-            params["filter"] = f"from-pub-date:{anio},until-pub-date:{anio}"
+            params1["filter"] = f"from-pub-date:{anio},until-pub-date:{anio}"
 
+        resultado = self._ejecutar_busqueda(params1, titulo, intentos)
+        if resultado.encontrado:
+            return resultado
+
+        # Paso 2: solo título, sin filtro de año
+        if query_solo_titulo != query_completa:
+            logger.info("crossref_reintento_solo_titulo", titulo=titulo[:60])
+            params2 = {**params_base, "query": query_solo_titulo}
+            resultado = self._ejecutar_busqueda(params2, titulo, intentos)
+            if resultado.encontrado:
+                return resultado
+
+        return ResultadoCrossRef(encontrado=False)
+
+    def _ejecutar_busqueda(
+        self,
+        params: dict,
+        titulo: str,
+        intentos: int,
+    ) -> ResultadoCrossRef:
+        """Ejecuta una petición a CrossRef con reintentos."""
         ultimo_error = None
         for intento in range(1, intentos + 1):
             try:
@@ -84,9 +103,7 @@ class CrossRefService:
                     logger.info("crossref_sin_resultados", titulo=titulo[:50])
                     return ResultadoCrossRef(encontrado=False)
 
-                # Tomar el primer resultado (mayor score de CrossRef)
-                mejor = items[0]
-                return self._parsear_resultado(mejor, titulo)
+                return self._parsear_resultado(items[0], titulo)
 
             except httpx.TimeoutException:
                 logger.warning("crossref_timeout", intento=intento)
@@ -137,6 +154,15 @@ class CrossRefService:
 
         # Score de coincidencia básico por título
         score = self._calcular_score(titulo_buscado, titulo_oficial)
+
+        if score < 0.30:
+            logger.warning(
+                "crossref_score_bajo_descartado",
+                score=round(score, 3),
+                titulo_buscado=titulo_buscado[:60],
+                titulo_encontrado=(titulo_oficial or "")[:60],
+            )
+            return ResultadoCrossRef(encontrado=False)
 
         logger.info(
             "crossref_encontrado",
