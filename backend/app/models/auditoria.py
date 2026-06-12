@@ -4,10 +4,9 @@ from pydantic import BaseModel, Field
 
 
 class VeredictoTipo(str, Enum):
-    VALIDA = "VÁLIDA"
-    DUDOSA = "DUDOSA"
-    ALUCINADA = "ALUCINADA"
-    NO_VERIFICABLE = "NO_VERIFICABLE"
+    SUPPORTS = "SUPPORTS"
+    REFUTES  = "REFUTES"
+    NO_INFO  = "NO_INFO"
 
 
 # HU-010: Veredicto de una cita individual
@@ -27,31 +26,26 @@ class VeredictoAuditoria(BaseModel):
     anio_referencia: Optional[int] = None
     metodo_recuperacion: str = ""
     pagina_paper: Optional[int] = None
-    faithfulness:       Optional[float] = None
-    answer_relevancy:   Optional[float] = None
-    context_precision:  Optional[float] = None
-    context_recall:     Optional[float] = None
-    answer_correctness: Optional[float] = None
+    faithfulness:      Optional[float] = None
+    answer_relevancy:  Optional[float] = None
+    context_precision: Optional[float] = None
 
 
 # EP-RAGAS: Métricas promedio del documento
 class MetricasRagasResponse(BaseModel):
-    total_evaluadas:             int
-    faithfulness_promedio:       Optional[float] = None
-    answer_relevancy_promedio:   Optional[float] = None
-    context_precision_promedio:  Optional[float] = None
-    context_recall_promedio:     Optional[float] = None
-    answer_correctness_promedio: Optional[float] = None
+    total_evaluadas:            int
+    faithfulness_promedio:      Optional[float] = None
+    answer_relevancy_promedio:  Optional[float] = None
+    context_precision_promedio: Optional[float] = None
 
 
 # HU-010: Respuesta completa de auditoría del documento
 class AuditoriaResponse(BaseModel):
     documento_id: str
     total_citas: int
-    validas: int
-    dudosas: int
-    alucinadas: int
-    no_verificables: int
+    supports: int
+    refutes: int
+    no_info: int
     veredictos: list[VeredictoAuditoria]
     advertencia: Optional[str] = None
 
@@ -84,6 +78,6 @@ class AlertaAlucinacionSistema(BaseModel):
 # HU-012: Respuesta de alertas de alucinación del sistema
 class AlertasAlucinacionResponse(BaseModel):
     documento_id: str
-    total_no_verificables: int
+    total_no_info: int
     alertas: list[AlertaAlucinacionSistema]
     advertencia: Optional[str] = None

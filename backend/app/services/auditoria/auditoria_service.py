@@ -7,10 +7,9 @@ Flujo por cita:
   3. Neo4j                 → persiste el veredicto en el nodo Cita
 
 Veredictos:
-  VÁLIDA         → la cita es fiel al fragmento encontrado
-  DUDOSA         → hay referencia pero la cita distorsiona o exagera
-  ALUCINADA      → no hay evidencia que respalde la afirmación
-  NO_VERIFICABLE → el sistema no encontró fragmento ni nodo para verificar
+  SUPPORTS → el fragmento respalda directamente la afirmación del tesista
+  REFUTES  → el fragmento contradice, niega o es incompatible con la afirmación
+  NO_INFO  → no hay fragmento suficiente para determinar si la afirmación es verdadera o falsa
 """
 import structlog
 from typing import Optional
@@ -31,22 +30,26 @@ from app.models.auditoria import (
 logger = structlog.get_logger(__name__)
 settings = get_settings()
 
-SYSTEM_AUDITORIA = """Eres un auditor académico experto en normas APA 7ma edición.
-Tu tarea es verificar si una cita bibliográfica es fiel a su fuente original.
+SYSTEM_AUDITORIA = """Eres un auditor académico especializado en verificación de citas APA 7ma edición.
+Tu tarea es determinar si la afirmación del tesista está respaldada, refutada o no verificable
+en base al texto real del paper citado.
 
-Se te dará:
-- AFIRMACIÓN DEL TESISTA: la oración completa donde aparece la cita en la tesis
-- CITA APA: la referencia entre paréntesis o narrativa
-- FRAGMENTO DEL PAPER: el texto real del paper citado recuperado semánticamente
+El tesista puede escribir en español aunque el paper citado esté en inglés.
+Evalúa el contenido semántico, no el idioma. Una paráfrasis o traducción fiel cuenta como SUPPORTS.
 
-Responde ÚNICAMENTE con uno de estos veredictos y su justificación en este formato exacto:
-VEREDICTO: <VÁLIDA|DUDOSA|ALUCINADA>
-JUSTIFICACIÓN: <una sola oración explicando el veredicto>
+Recibirás:
+- AFIRMACIÓN DEL TESISTA: la oración completa de la tesis que contiene la cita
+- CITA APA: la referencia en texto
+- FRAGMENTO DEL PAPER: el texto real recuperado del paper citado
+
+Responde ÚNICAMENTE con un veredicto y su justificación en este formato exacto:
+VERDICT: <SUPPORTS|REFUTES|NO_INFO>
+JUSTIFICATION: <una oración que explique el veredicto>
 
 Criterios:
-- VÁLIDA: la afirmación del tesista refleja fielmente lo que dice el fragmento del paper
-- DUDOSA: la afirmación exagera, simplifica en exceso o tergiversa parcialmente el fragmento
-- ALUCINADA: la afirmación dice algo que el fragmento no dice o contradice directamente"""
+- SUPPORTS: el fragmento contiene evidencia directa que respalda la afirmación del tesista. La información citada es fiel a la fuente.
+- REFUTES: el fragmento contradice, niega o es incompatible con la afirmación del tesista. Hay distorsión, exageración o tergiversación de la fuente.
+- NO_INFO: el fragmento no contiene información suficiente para determinar si la afirmación es verdadera o falsa. Incluye citas fabricadas, fuentes inexistentes o fragmentos sin relación con la afirmación."""
 
 
 _Q_CITAS_DOCUMENTO = """
@@ -136,10 +139,9 @@ class AuditoriaService:
             "auditoria_completada",
             doc_id=documento_id,
             total=total,
-            validas=sum(1 for v in veredictos if v.veredicto == VeredictoTipo.VALIDA),
-            dudosas=sum(1 for v in veredictos if v.veredicto == VeredictoTipo.DUDOSA),
-            alucinadas=sum(1 for v in veredictos if v.veredicto == VeredictoTipo.ALUCINADA),
-            no_verificables=sum(1 for v in veredictos if v.veredicto == VeredictoTipo.NO_VERIFICABLE),
+            supports=sum(1 for v in veredictos if v.veredicto == VeredictoTipo.SUPPORTS),
+            refutes=sum(1 for v in veredictos if v.veredicto == VeredictoTipo.REFUTES),
+            no_info=sum(1 for v in veredictos if v.veredicto == VeredictoTipo.NO_INFO),
         )
         return veredictos
 
@@ -194,7 +196,7 @@ class AuditoriaService:
         veredictos: list[VeredictoAuditoria],
     ) -> list[AlertaAlucinacionSistema]:
         """
-        Filtra los veredictos NO_VERIFICABLE y los convierte en alertas
+        Filtra los veredictos NO_INFO y los convierte en alertas
         explícitas para que el revisor no confíe en esos resultados.
         """
         return [
@@ -205,7 +207,7 @@ class AuditoriaService:
                 razon_no_verificable=v.justificacion,
             )
             for v in veredictos
-            if v.veredicto == VeredictoTipo.NO_VERIFICABLE
+            if v.veredicto == VeredictoTipo.NO_INFO
         ]
 
     # ── Internos ─────────────────────────────────────────────────────────
@@ -228,7 +230,7 @@ class AuditoriaService:
                 cita_id=cita_id,
                 texto_cita=texto_cita,
                 pagina=pagina,
-                veredicto=VeredictoTipo.NO_VERIFICABLE,
+                veredicto=VeredictoTipo.NO_INFO,
                 justificacion="No se encontró una referencia bibliográfica vinculada a esta cita.",
                 metodo_recuperacion="no_encontrado",
                 pagina_paper=None,
@@ -244,7 +246,7 @@ class AuditoriaService:
                     cita_id=cita_id,
                     texto_cita=texto_cita,
                     pagina=pagina,
-                    veredicto=VeredictoTipo.NO_VERIFICABLE,
+                    veredicto=VeredictoTipo.NO_INFO,
                     justificacion="El paper citado no está disponible en la base de conocimiento.",
                     metodo_recuperacion="no_encontrado",
                     pagina_paper=None,
@@ -256,6 +258,7 @@ class AuditoriaService:
         resultado = recuperacion_service.consultar_cita(
             documento_id=documento_id,
             cita_id=cita_id,
+            fragmento_oracion=fragmento_oracion,
         )
 
         pagina_paper = resultado.pagina_paper
@@ -273,7 +276,7 @@ class AuditoriaService:
                 cita_id=cita_id,
                 texto_cita=texto_cita,
                 pagina=pagina,
-                veredicto=VeredictoTipo.NO_VERIFICABLE,
+                veredicto=VeredictoTipo.NO_INFO,
                 justificacion=(
                     "No se encontró texto del paper citado en la base de conocimiento. "
                     "La referencia existe en el grafo pero no hay fragmento disponible para verificar."
@@ -339,7 +342,7 @@ class AuditoriaService:
         except Exception as e:
             logger.error("error_llm_auditoria", error=str(e))
             return (
-                VeredictoTipo.NO_VERIFICABLE,
+                VeredictoTipo.NO_INFO,
                 "El servicio de verificación no pudo procesar esta cita.",
             )
 
@@ -347,25 +350,25 @@ class AuditoriaService:
     def _parsear_respuesta_llm(respuesta: str) -> tuple[VeredictoTipo, str]:
         """
         Parsea la respuesta del LLM con el formato:
-        VEREDICTO: VÁLIDA|DUDOSA|ALUCINADA
-        JUSTIFICACIÓN: ...
+        VERDICT: SUPPORTS|REFUTES|NO_INFO
+        JUSTIFICATION: ...
         """
         lineas = respuesta.strip().splitlines()
-        veredicto_tipo = VeredictoTipo.NO_VERIFICABLE
-        justificacion = "No se pudo interpretar la respuesta del verificador."
+        veredicto_tipo = VeredictoTipo.NO_INFO
+        justificacion = "Could not interpret the verifier's response."
 
         for linea in lineas:
-            linea = linea.strip()
-            if linea.upper().startswith("VEREDICTO:"):
+            linea_upper = linea.strip().upper()
+            if linea_upper.startswith("VERDICT:"):
                 valor = linea.split(":", 1)[1].strip().upper()
-                if "VÁLIDA" in valor or "VALIDA" in valor:
-                    veredicto_tipo = VeredictoTipo.VALIDA
-                elif "DUDOSA" in valor:
-                    veredicto_tipo = VeredictoTipo.DUDOSA
-                elif "ALUCINADA" in valor:
-                    veredicto_tipo = VeredictoTipo.ALUCINADA
+                if "SUPPORTS" in valor:
+                    veredicto_tipo = VeredictoTipo.SUPPORTS
+                elif "REFUTES" in valor:
+                    veredicto_tipo = VeredictoTipo.REFUTES
+                elif "NO_INFO" in valor or "NO INFO" in valor:
+                    veredicto_tipo = VeredictoTipo.NO_INFO
 
-            elif linea.upper().startswith("JUSTIFICACIÓN:") or linea.upper().startswith("JUSTIFICACION:"):
+            elif linea_upper.startswith("JUSTIFICATION:"):
                 justificacion = linea.split(":", 1)[1].strip()
 
         return veredicto_tipo, justificacion
@@ -394,17 +397,19 @@ class AuditoriaService:
     def evaluar_ragas_documento(self, doc_id: str) -> dict:
         from app.services.evaluacion.ragas_service import ragas_service
 
-        # 1. Leer citas con fragmento_evidencia no vacío
+        # 1. Leer citas auditadas con fragmento de paper disponible
         _Q_LEER_CITAS = """
             MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
             WHERE c.fragmento IS NOT NULL
               AND c.fragmento_evidencia IS NOT NULL
               AND c.fragmento_evidencia <> ''
+              AND c.veredicto IS NOT NULL
               AND c.justificacion IS NOT NULL
             RETURN
                 c.id                  AS cita_id,
-                c.fragmento           AS pregunta,
-                c.justificacion       AS respuesta,
+                c.fragmento           AS fragmento_oracion,
+                c.veredicto           AS veredicto,
+                c.justificacion       AS justificacion,
                 c.fragmento_evidencia AS fragmento_evidencia
         """
         with neo4j_service.driver.session(
@@ -422,31 +427,27 @@ class AuditoriaService:
         # 2. Evaluar con RAGAS (Neo4j cerrado)
         scores_por_cita = []
         for i, cita in enumerate(citas, 1):
-            logger.info(
-                "ragas_evaluando_cita",
-                numero=i,
-                total=len(citas),
-            )
+            logger.info("ragas_evaluando_cita", numero=i, total=len(citas))
+            # pregunta = el claim del tesista que se está verificando
+            # respuesta = veredicto + justificación del auditor (respuesta completa del sistema)
+            respuesta_auditoria = f"{cita['veredicto']}: {cita['justificacion']}"
             scores = ragas_service.evaluar_cita(
-                pregunta   = cita["pregunta"],
-                respuesta  = cita["respuesta"],
-                contextos  = [cita["fragmento_evidencia"]],
-                referencia = cita["fragmento_evidencia"],
+                pregunta  = cita["fragmento_oracion"],
+                respuesta = respuesta_auditoria,
+                contextos = [cita["fragmento_evidencia"]],
             )
             scores_por_cita.append({
                 "cita_id": cita["cita_id"],
                 **scores
             })
 
-        # 3. Guardar en Neo4j en batch
+        # 3. Guardar en Neo4j en batch (solo las 3 métricas válidas)
         _Q_GUARDAR_RAGAS = """
             MATCH (c:Cita {id: $cita_id})
-            SET c.faithfulness       = $faithfulness,
-                c.answer_relevancy   = $answer_relevancy,
-                c.context_precision  = $context_precision,
-                c.context_recall     = $context_recall,
-                c.answer_correctness = $answer_correctness,
-                c.ragas_evaluado_en  = datetime()
+            SET c.faithfulness      = $faithfulness,
+                c.answer_relevancy  = $answer_relevancy,
+                c.context_precision = $context_precision,
+                c.ragas_evaluado_en = datetime()
         """
         with neo4j_service.driver.session(
             database=settings.neo4j_database
@@ -462,19 +463,14 @@ class AuditoriaService:
                     )
 
         def promedio(key):
-            vals = [
-                s[key] for s in scores_por_cita
-                if s.get(key) is not None
-            ]
+            vals = [s[key] for s in scores_por_cita if s.get(key) is not None]
             return round(sum(vals) / len(vals), 3) if vals else None
 
         return {
-            "total_evaluadas":             len(scores_por_cita),
-            "faithfulness_promedio":       promedio("faithfulness"),
-            "answer_relevancy_promedio":   promedio("answer_relevancy"),
-            "context_precision_promedio":  promedio("context_precision"),
-            "context_recall_promedio":     promedio("context_recall"),
-            "answer_correctness_promedio": promedio("answer_correctness"),
+            "total_evaluadas":            len(scores_por_cita),
+            "faithfulness_promedio":      promedio("faithfulness"),
+            "answer_relevancy_promedio":  promedio("answer_relevancy"),
+            "context_precision_promedio": promedio("context_precision"),
         }
 
 

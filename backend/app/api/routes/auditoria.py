@@ -58,25 +58,23 @@ async def auditar_documento(documento_id: str):
                 },
             )
 
-        validas        = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.VALIDA)
-        dudosas        = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.DUDOSA)
-        alucinadas     = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.ALUCINADA)
-        no_verificables = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.NO_VERIFICABLE)
+        supports    = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.SUPPORTS)
+        refutes     = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.REFUTES)
+        no_info     = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.NO_INFO)
 
         advertencia = None
-        if no_verificables > 0:
+        if no_info > 0:
             advertencia = (
-                f"{no_verificables} cita(s) no pudieron verificarse por falta de evidencia. "
-                f"Revisa las alertas de alucinación del sistema."
+                f"{no_info} cita(s) no pudieron verificarse por falta de evidencia. "
+                f"Revisa las alertas de verificación."
             )
 
         return AuditoriaResponse(
             documento_id=documento_id,
             total_citas=len(veredictos),
-            validas=validas,
-            dudosas=dudosas,
-            alucinadas=alucinadas,
-            no_verificables=no_verificables,
+            supports=supports,
+            refutes=refutes,
+            no_info=no_info,
             veredictos=veredictos,
             advertencia=advertencia,
         )
@@ -116,11 +114,9 @@ async def ver_veredictos(documento_id: str):
       c.veredicto     AS veredicto,
       c.justificacion AS justificacion,
       c.pagina_paper  AS pagina_paper,
-      c.faithfulness       AS faithfulness,
-      c.answer_relevancy   AS answer_relevancy,
-      c.context_precision  AS context_precision,
-      c.context_recall     AS context_recall,
-      c.answer_correctness AS answer_correctness,
+      c.faithfulness      AS faithfulness,
+      c.answer_relevancy  AS answer_relevancy,
+      c.context_precision AS context_precision,
       r.id            AS ref_id,
       r.titulo_oficial AS ref_titulo_oficial,
       r.titulo        AS ref_titulo,
@@ -147,7 +143,7 @@ async def ver_veredictos(documento_id: str):
             try:
                 tipo = VeredictoTipo(r["veredicto"])
             except ValueError:
-                tipo = VeredictoTipo.NO_VERIFICABLE
+                tipo = VeredictoTipo.NO_INFO
 
             veredictos.append(VeredictoAuditoria(
                 cita_id=r["cita_id"],
@@ -165,22 +161,18 @@ async def ver_veredictos(documento_id: str):
                 faithfulness=r.get("faithfulness"),
                 answer_relevancy=r.get("answer_relevancy"),
                 context_precision=r.get("context_precision"),
-                context_recall=r.get("context_recall"),
-                answer_correctness=r.get("answer_correctness"),
             ))
 
-        validas         = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.VALIDA)
-        dudosas         = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.DUDOSA)
-        alucinadas      = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.ALUCINADA)
-        no_verificables = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.NO_VERIFICABLE)
+        supports = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.SUPPORTS)
+        refutes  = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.REFUTES)
+        no_info  = sum(1 for v in veredictos if v.veredicto == VeredictoTipo.NO_INFO)
 
         return AuditoriaResponse(
             documento_id=documento_id,
             total_citas=len(veredictos),
-            validas=validas,
-            dudosas=dudosas,
-            alucinadas=alucinadas,
-            no_verificables=no_verificables,
+            supports=supports,
+            refutes=refutes,
+            no_info=no_info,
             veredictos=veredictos,
         )
 
@@ -266,7 +258,7 @@ async def ver_alertas_alucinaciones(documento_id: str):
             registros = list(session.run(
                 query,
                 doc_id=documento_id,
-                veredicto=VeredictoTipo.NO_VERIFICABLE.value,
+                veredicto=VeredictoTipo.NO_INFO.value,
             ))
 
         from app.models.auditoria import AlertaAlucinacionSistema
@@ -289,7 +281,7 @@ async def ver_alertas_alucinaciones(documento_id: str):
 
         return AlertasAlucinacionResponse(
             documento_id=documento_id,
-            total_no_verificables=len(alertas),
+            total_no_info=len(alertas),
             alertas=alertas,
             advertencia=advertencia,
         )
@@ -358,12 +350,10 @@ async def ver_metricas(documento_id: str):
     MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
     WHERE c.faithfulness IS NOT NULL
     RETURN
-      avg(c.faithfulness)       AS faithfulness_promedio,
-      avg(c.answer_relevancy)   AS answer_relevancy_promedio,
-      avg(c.context_precision)  AS context_precision_promedio,
-      avg(c.context_recall)     AS context_recall_promedio,
-      avg(c.answer_correctness) AS answer_correctness_promedio,
-      count(c)                  AS total_citas_evaluadas
+      avg(c.faithfulness)      AS faithfulness_promedio,
+      avg(c.answer_relevancy)  AS answer_relevancy_promedio,
+      avg(c.context_precision) AS context_precision_promedio,
+      count(c)                 AS total_citas_evaluadas
     """
     try:
         with neo4j_service.driver.session(database=settings.neo4j_database) as session:
@@ -388,8 +378,6 @@ async def ver_metricas(documento_id: str):
             faithfulness_promedio=_redondear(registro["faithfulness_promedio"]),
             answer_relevancy_promedio=_redondear(registro["answer_relevancy_promedio"]),
             context_precision_promedio=_redondear(registro["context_precision_promedio"]),
-            context_recall_promedio=_redondear(registro["context_recall_promedio"]),
-            answer_correctness_promedio=_redondear(registro["answer_correctness_promedio"]),
         )
 
     except HTTPException:
@@ -403,112 +391,229 @@ async def ver_metricas(documento_id: str):
         )
 
 
-# ── EP-RAGAS: Exportar scores individuales a Excel ──────────────────────────
+# ── Exportar informe completo a Excel ───────────────────────────────────────
 
 @router.get(
     "/{documento_id}/metricas/exportar",
-    summary="EP-RAGAS: Exportar scores RAGAS individuales por cita a Excel",
+    summary="Exportar informe completo de auditoría a Excel",
 )
 async def exportar_metricas_excel(documento_id: str):
     """
-    Genera y descarga un archivo Excel con los scores RAGAS
-    de cada cita que fue evaluada (tiene c.faithfulness IS NOT NULL).
+    Genera un Excel con dos hojas:
+    - Resumen: estadísticas generales del documento
+    - Citas:   detalle por cita con veredicto, fragmentos y métricas RAGAS
     """
-    query = """
+    _Q_CITAS_DETALLE = """
     MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
-    WHERE c.faithfulness IS NOT NULL
+    OPTIONAL MATCH (c)-[:CITA_A]->(r:Referencia)
+    OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
     RETURN
       c.texto              AS texto_cita,
-      c.pagina             AS pagina,
+      c.fragmento          AS fragmento_oracion,
+      c.pagina             AS pagina_tesis,
       c.veredicto          AS veredicto,
+      c.justificacion      AS justificacion,
+      c.fragmento_evidencia AS fragmento_paper,
+      c.pagina_paper       AS pagina_paper,
       c.faithfulness       AS faithfulness,
       c.answer_relevancy   AS answer_relevancy,
       c.context_precision  AS context_precision,
-      c.context_recall     AS context_recall,
-      c.answer_correctness AS answer_correctness
+      r.titulo_oficial     AS titulo_oficial,
+      r.titulo             AS titulo_referencia,
+      r.anio               AS anio_referencia,
+      collect(DISTINCT a.nombre) AS autores
     ORDER BY c.pagina
     """
+
+    _Q_REFERENCIAS = """
+    MATCH (d:Documento {id: $doc_id})-[:TIENE_REFERENCIA]->(r:Referencia)
+    RETURN count(r) AS total_referencias,
+           sum(CASE WHEN r.nivel_confianza IS NOT NULL AND r.nivel_confianza <> 'no_encontrado' THEN 1 ELSE 0 END) AS con_texto
+    """
+
+    _Q_REFS_SIN_CITAR = """
+    MATCH (d:Documento {id: $doc_id})-[:TIENE_REFERENCIA]->(r:Referencia)
+    WHERE NOT (r)<-[:CITA_A]-()
+    RETURN count(r) AS total
+    """
+
+    _Q_CITAS_SIN_REF = """
+    MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
+    WHERE NOT (c)-[:CITA_A]->()
+    RETURN count(c) AS total
+    """
+
+    _Q_RAGAS_PROMEDIO = """
+    MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
+    WHERE c.faithfulness IS NOT NULL
+    RETURN
+      count(c)               AS total_evaluadas,
+      avg(c.faithfulness)    AS faithfulness_avg,
+      avg(c.answer_relevancy) AS relevancy_avg,
+      avg(c.context_precision) AS precision_avg
+    """
+
     try:
         with neo4j_service.driver.session(database=settings.neo4j_database) as session:
-            registros = list(session.run(query, doc_id=documento_id))
+            citas_raw   = list(session.run(_Q_CITAS_DETALLE, doc_id=documento_id))
+            refs_raw    = session.run(_Q_REFERENCIAS, doc_id=documento_id).single()
+            sin_citar   = session.run(_Q_REFS_SIN_CITAR, doc_id=documento_id).single()
+            sin_ref     = session.run(_Q_CITAS_SIN_REF, doc_id=documento_id).single()
+            ragas_prom  = session.run(_Q_RAGAS_PROMEDIO, doc_id=documento_id).single()
 
-        if not registros:
+        if not citas_raw:
             raise HTTPException(
                 status_code=404,
                 detail={
-                    "codigo": "METRICAS_NO_ENCONTRADAS",
-                    "mensaje": "No hay scores RAGAS calculados para exportar.",
-                    "accion_sugerida": "Ejecuta primero POST /auditoria/{documento_id}/evaluar-ragas.",
+                    "codigo": "CITAS_NO_ENCONTRADAS",
+                    "mensaje": "No hay citas auditadas para exportar.",
+                    "accion_sugerida": "Ejecuta primero POST /auditoria/{documento_id}/auditar.",
                 },
             )
 
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "RAGAS Scores"
-
-        encabezados = [
-            "Cita", "Página", "Veredicto",
-            "Faithfulness", "Answer Relevancy",
-            "Context Precision", "Context Recall", "Answer Correctness",
-        ]
-
-        header_fill = PatternFill("solid", fgColor="1E293B")
-        header_font = Font(bold=True, color="FFFFFF", size=11)
-        header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-
-        for col_idx, titulo in enumerate(encabezados, start=1):
-            celda = ws.cell(row=1, column=col_idx, value=titulo)
-            celda.fill = header_fill
-            celda.font = header_font
-            celda.alignment = header_alignment
-
-        ws.row_dimensions[1].height = 30
-
-        def _redondear(v):
+        def _r(v):
             return round(float(v), 3) if v is not None else None
 
-        for fila_idx, reg in enumerate(registros, start=2):
-            ws.cell(row=fila_idx, column=1, value=reg["texto_cita"] or "")
-            ws.cell(row=fila_idx, column=2, value=reg["pagina"] or 0)
-            ws.cell(row=fila_idx, column=3, value=reg["veredicto"] or "")
-            ws.cell(row=fila_idx, column=4, value=_redondear(reg["faithfulness"]))
-            ws.cell(row=fila_idx, column=5, value=_redondear(reg["answer_relevancy"]))
-            ws.cell(row=fila_idx, column=6, value=_redondear(reg["context_precision"]))
-            ws.cell(row=fila_idx, column=7, value=_redondear(reg["context_recall"]))
-            ws.cell(row=fila_idx, column=8, value=_redondear(reg["answer_correctness"]))
+        # ── Estilos compartidos ──────────────────────────────────────────────
+        header_fill = PatternFill("solid", fgColor="1E293B")
+        header_font = Font(bold=True, color="FFFFFF", size=11)
+        header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        section_fill = PatternFill("solid", fgColor="334155")
+        section_font = Font(bold=True, color="CBD5E1", size=10)
+        center = Alignment(horizontal="center", vertical="center")
+        wrap   = Alignment(wrap_text=True, vertical="top")
 
-            # Color de fondo por veredicto
+        FILL_SUPPORTS = PatternFill("solid", fgColor="D1FAE5")
+        FILL_REFUTES  = PatternFill("solid", fgColor="FEE2E2")
+        FILL_NO_INFO  = PatternFill("solid", fgColor="F1F5F9")
+
+        wb = openpyxl.Workbook()
+
+        # ── Hoja 1: Resumen ──────────────────────────────────────────────────
+        ws_res = wb.active
+        ws_res.title = "Resumen"
+
+        def _escribir_seccion(ws, fila, titulo):
+            c = ws.cell(row=fila, column=1, value=titulo)
+            c.fill = section_fill
+            c.font = section_font
+            c.alignment = center
+            ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=2)
+            ws.row_dimensions[fila].height = 20
+            return fila + 1
+
+        def _escribir_fila(ws, fila, etiqueta, valor):
+            ws.cell(row=fila, column=1, value=etiqueta).font = Font(bold=False, size=10)
+            ws.cell(row=fila, column=2, value=valor).alignment = center
+            return fila + 1
+
+        fila = 1
+        fila = _escribir_seccion(ws_res, fila, "REFERENCIAS")
+        total_refs = refs_raw["total_referencias"] if refs_raw else 0
+        con_texto  = refs_raw["con_texto"] if refs_raw else 0
+        fila = _escribir_fila(ws_res, fila, "Total referencias bibliográficas", total_refs)
+        fila = _escribir_fila(ws_res, fila, "Referencias con texto disponible", con_texto)
+        fila = _escribir_fila(ws_res, fila, "Referencias no encontradas", total_refs - con_texto)
+        fila = _escribir_fila(ws_res, fila, "Referencias sin citar en el texto", sin_citar["total"] if sin_citar else 0)
+
+        fila += 1
+        fila = _escribir_seccion(ws_res, fila, "CITAS")
+        total_citas   = len(citas_raw)
+        supports_cnt  = sum(1 for r in citas_raw if r["veredicto"] == "SUPPORTS")
+        refutes_cnt   = sum(1 for r in citas_raw if r["veredicto"] == "REFUTES")
+        no_info_cnt   = sum(1 for r in citas_raw if r["veredicto"] == "NO_INFO")
+        sin_ref_cnt   = sin_ref["total"] if sin_ref else 0
+        fila = _escribir_fila(ws_res, fila, "Total citas identificadas", total_citas)
+        fila = _escribir_fila(ws_res, fila, "Citas sin referencia bibliográfica", sin_ref_cnt)
+        fila = _escribir_fila(ws_res, fila, "Veredicto SUPPORTS (respaldadas)", supports_cnt)
+        fila = _escribir_fila(ws_res, fila, "Veredicto REFUTES (refutadas)", refutes_cnt)
+        fila = _escribir_fila(ws_res, fila, "Veredicto NO_INFO (no verificables)", no_info_cnt)
+
+        fila += 1
+        total_ev = ragas_prom["total_evaluadas"] if ragas_prom else 0
+        if total_ev:
+            fila = _escribir_seccion(ws_res, fila, "MÉTRICAS RAGAS")
+            fila = _escribir_fila(ws_res, fila, "Citas evaluadas con RAGAS", int(total_ev))
+            fila = _escribir_fila(ws_res, fila, "Faithfulness (promedio)", _r(ragas_prom["faithfulness_avg"]))
+            fila = _escribir_fila(ws_res, fila, "Answer Relevancy (promedio)", _r(ragas_prom["relevancy_avg"]))
+            fila = _escribir_fila(ws_res, fila, "Context Precision (promedio)", _r(ragas_prom["precision_avg"]))
+
+        ws_res.column_dimensions["A"].width = 42
+        ws_res.column_dimensions["B"].width = 16
+
+        # ── Hoja 2: Citas ────────────────────────────────────────────────────
+        ws_citas = wb.create_sheet("Citas")
+
+        encabezados = [
+            "Paper (título)",
+            "Cita APA",
+            "Afirmación del tesista",
+            "Fragmento del paper",
+            "Pág. tesis",
+            "Pág. paper",
+            "Veredicto",
+            "Justificación",
+            "Faithfulness",
+            "Answer Relevancy",
+            "Context Precision",
+        ]
+
+        for col_idx, titulo in enumerate(encabezados, start=1):
+            c = ws_citas.cell(row=1, column=col_idx, value=titulo)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = header_align
+        ws_citas.row_dimensions[1].height = 32
+
+        for fila_idx, reg in enumerate(citas_raw, start=2):
+            titulo_paper = reg["titulo_oficial"] or reg["titulo_referencia"] or ""
+            ws_citas.cell(row=fila_idx, column=1,  value=titulo_paper).alignment = wrap
+            ws_citas.cell(row=fila_idx, column=2,  value=reg["texto_cita"] or "").alignment = wrap
+            ws_citas.cell(row=fila_idx, column=3,  value=reg["fragmento_oracion"] or "").alignment = wrap
+            ws_citas.cell(row=fila_idx, column=4,  value=reg["fragmento_paper"] or "").alignment = wrap
+            ws_citas.cell(row=fila_idx, column=5,  value=reg["pagina_tesis"] or "").alignment = center
+            ws_citas.cell(row=fila_idx, column=6,  value=reg["pagina_paper"] or "").alignment = center
+            ws_citas.cell(row=fila_idx, column=7,  value=reg["veredicto"] or "").alignment = center
+            ws_citas.cell(row=fila_idx, column=8,  value=reg["justificacion"] or "").alignment = wrap
+            ws_citas.cell(row=fila_idx, column=9,  value=_r(reg["faithfulness"])).alignment = center
+            ws_citas.cell(row=fila_idx, column=10, value=_r(reg["answer_relevancy"])).alignment = center
+            ws_citas.cell(row=fila_idx, column=11, value=_r(reg["context_precision"])).alignment = center
+
             veredicto = reg["veredicto"] or ""
-            if veredicto == "VÁLIDA":
-                row_fill = PatternFill("solid", fgColor="D1FAE5")
-            elif veredicto == "DUDOSA":
-                row_fill = PatternFill("solid", fgColor="FEF3C7")
-            elif veredicto == "ALUCINADA":
-                row_fill = PatternFill("solid", fgColor="FEE2E2")
+            if veredicto == "SUPPORTS":
+                row_fill = FILL_SUPPORTS
+            elif veredicto == "REFUTES":
+                row_fill = FILL_REFUTES
+            elif veredicto == "NO_INFO":
+                row_fill = FILL_NO_INFO
             else:
                 row_fill = None
 
             if row_fill:
-                for col_idx in range(1, 9):
-                    ws.cell(row=fila_idx, column=col_idx).fill = row_fill
+                for col_idx in range(1, 12):
+                    ws_citas.cell(row=fila_idx, column=col_idx).fill = row_fill
 
-        # Ancho de columnas
-        ws.column_dimensions["A"].width = 55
-        ws.column_dimensions["B"].width = 8
-        ws.column_dimensions["C"].width = 16
-        for col_letter in ("D", "E", "F", "G", "H"):
-            ws.column_dimensions[col_letter].width = 18
-
-        ws.freeze_panes = "A2"
+        ws_citas.column_dimensions["A"].width = 40
+        ws_citas.column_dimensions["B"].width = 22
+        ws_citas.column_dimensions["C"].width = 45
+        ws_citas.column_dimensions["D"].width = 55
+        ws_citas.column_dimensions["E"].width = 10
+        ws_citas.column_dimensions["F"].width = 10
+        ws_citas.column_dimensions["G"].width = 14
+        ws_citas.column_dimensions["H"].width = 45
+        ws_citas.column_dimensions["I"].width = 15
+        ws_citas.column_dimensions["J"].width = 17
+        ws_citas.column_dimensions["K"].width = 17
+        ws_citas.freeze_panes = "A2"
 
         buffer = io.BytesIO()
         wb.save(buffer)
         buffer.seek(0)
 
-        filename = f"ragas_{documento_id}.xlsx"
+        filename = f"informe_{documento_id}.xlsx"
         headers = {"Content-Disposition": f"attachment; filename={filename}"}
 
-        logger.info("exportar_metricas_excel", doc_id=documento_id, total=len(registros))
+        logger.info("exportar_informe_excel", doc_id=documento_id, total_citas=len(citas_raw))
         return StreamingResponse(
             buffer,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -518,7 +623,7 @@ async def exportar_metricas_excel(documento_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("error_exportar_metricas", doc_id=documento_id, error=str(e))
+        logger.error("error_exportar_informe", doc_id=documento_id, error=str(e))
         raise HTTPException(
             status_code=500,
             detail={"codigo": "ERROR_INTERNO", "mensaje": str(e),

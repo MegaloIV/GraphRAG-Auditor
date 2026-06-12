@@ -58,14 +58,18 @@ Responde ÚNICAMENTE con un JSON array. Sin texto adicional.
 
 Tipos de cita APA:
 - Parentética: (Apellido, año) o (Apellido & Apellido, año) o (Apellido et al., año)
-- Narrativa: Apellido (año)
+- Narrativa: Apellido (año) o Apellido y Apellido (año) o Apellido et al. (año)
 
 Campo "tipo" — regla obligatoria:
 - Si el apellido aparece DENTRO del paréntesis → tipo: "PARENTETICA"
-  Ejemplo: "(Arévalo et al., 2021)", "(Smith, 2020)"
+  Ejemplo: "(Arévalo et al., 2021)", "(Smith, 2020)", "(Landis y Koch, 1977)"
 - Si el apellido está FUERA del paréntesis y solo el año va dentro → tipo: "NARRATIVA"
-  Ejemplo: "Arévalo et al. (2021)", "Smith (2020)"
+  Ejemplo: "Arévalo et al. (2021)", "Smith (2020)", "Landis y Koch (1977)", "Walters y Wilder (2023)"
 El valor SIEMPRE debe ser exactamente "PARENTETICA" o "NARRATIVA", nunca otro valor.
+
+Para citas narrativas con dos autores como "Landis y Koch (1977)":
+- texto_cita: "Landis y Koch (1977)"  ← incluye AMBOS apellidos y el conector "y"
+- tipo: "NARRATIVA"
 
 Campo "texto_cita" — reproduce la cita tal como aparece en el texto original:
 - Parentética: "(Arévalo et al., 2021)"
@@ -109,7 +113,9 @@ INCORRECTO para Arévalo (NO hagas esto):
 Reglas estrictas:
 - NUNCA dejes fragmento_oracion vacío o igual a texto_cita
 - NUNCA incluyas en un fragmento texto que pertenezca a la siguiente cita
-- El fragmento de una cita parentética SIEMPRE termina en ")" de esa cita"""
+- El fragmento de una cita parentética SIEMPRE termina en ")" de esa cita
+- Si el texto visible comienza a mitad de una idea (empieza con minúscula, conjunción o conector), busca el inicio real de esa idea en el CONTEXTO PREVIO e inclúyelo en fragmento_oracion. En ese caso el fragmento_oracion debe empezar desde el texto del CONTEXTO PREVIO (desde donde empieza la idea) y continuar hasta el cierre de la cita en el bloque principal.
+- Si la idea empieza claramente dentro del bloque principal (empieza con mayúscula y sujeto completo), no uses el CONTEXTO PREVIO en fragmento_oracion."""
 
 
 class EntidadExtractionService:
@@ -188,6 +194,12 @@ class EntidadExtractionService:
                 if citas_en_bloque
                 else "(ninguna detectada)"
             )
+            contexto_previo = bloques[i - 1][-600:] if i > 0 else ""
+            prefijo_contexto = (
+                f"[CONTEXTO PREVIO — solo para determinar dónde empieza una idea"
+                f", no extraer citas de aquí]:\n{contexto_previo}\n\n---\n\n"
+                if contexto_previo else ""
+            )
             try:
                 respuesta = llm_service.completar(
                     system_prompt=SYSTEM_CITAS,
@@ -195,7 +207,7 @@ class EntidadExtractionService:
                         f"Detecta las citas APA en este fragmento"
                         f" (página aprox. {pagina_estimada}).\n\n"
                         f"Citas detectadas por regex en este fragmento:\n{lista_citas}\n\n"
-                        f"Texto:\n{bloque}"
+                        f"Texto:\n{prefijo_contexto}{bloque}"
                     ),
                 )
                 citas_raw = self._parsear_json(respuesta)
@@ -210,13 +222,20 @@ class EntidadExtractionService:
                     if not fragmento or fragmento == texto_cita:
                         if fragmento == texto_cita:
                             logger.warning("fragmento_oracion_igual_a_cita", cita=texto_cita)
-                        fragmento = ""
+                        fragmento = self._extraer_oracion_fallback(bloque, texto_cita)
+                    # Para citas parentéticas el fragmento debe terminar en el ")" de la cita.
+                    # Si el LLM incluyó texto posterior, se trunca aquí.
+                    if tipo == TipoCita.PARENTETICA and texto_cita in fragmento:
+                        idx_fin = fragmento.find(texto_cita) + len(texto_cita)
+                        fragmento = fragmento[:idx_fin]
+                    # Narrativa puede incluir descripciones metodológicas largas (~200-400 palabras).
+                    limite = 1500 if tipo == TipoCita.NARRATIVA else 800
                     todas.append(CitaEnTexto(
                         cita_id=str(uuid.uuid4()),
                         texto_cita=texto_cita,
                         tipo=tipo,
                         pagina=cita.get("pagina", pagina_estimada),
-                        fragmento_oracion=fragmento[:800],
+                        fragmento_oracion=fragmento[:limite],
                     ))
             except Exception as e:
                 logger.error("error_extraccion_citas", bloque=i, error=str(e))
@@ -224,7 +243,10 @@ class EntidadExtractionService:
         vistas: set[tuple] = set()
         dedup: list[CitaEnTexto] = []
         for c in todas:
-            key = (c.texto_cita, c.pagina)
+            # Deduplicar por texto de cita + inicio del fragmento:
+            # misma cita en distinto contexto (pág. diferente) se conserva;
+            # duplicados exactos del mismo fragmento se descartan.
+            key = (c.texto_cita, c.fragmento_oracion[:80])
             if key not in vistas:
                 vistas.add(key)
                 dedup.append(c)
@@ -284,10 +306,16 @@ class EntidadExtractionService:
 
     def _detectar_citas_regex(self, texto: str) -> list[str]:
         patrones = [
+            # Parentética simple o con dos autores: (Apellido, año) / (Apellido y Apellido, año)
             r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+y\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?,\s*(?:19|20)\d{2}(?:,\s*p{1,2}\.\s*\d+(?:-\d+)?)?\)',
+            # Parentética et al.: (Apellido et al., año)
             r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s+et\s+al\.,\s*(?:19|20)\d{2}(?:,\s*p{1,2}\.\s*\d+(?:-\d+)?)?\)',
+            # Parentética con &: (Apellido & Apellido, año)
             r'\([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+&\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)?,\s*(?:19|20)\d{2}\)',
+            # Narrativa simple o et al.: Apellido (año) / Apellido et al. (año)
             r'[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+(?:\s+et\s+al\.)?\s*\((?:19|20)\d{2}\)',
+            # Narrativa con dos autores: Apellido y Apellido (año)
+            r'[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s+y\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+\s*\((?:19|20)\d{2}\)',
         ]
 
         encontradas = set()
@@ -295,7 +323,13 @@ class EntidadExtractionService:
             matches = re.findall(patron, texto)
             encontradas.update(matches)
 
-        return list(encontradas)
+        # Eliminar subcoincidencias: si "Koch (1977)" ya está cubierto por
+        # "Landis y Koch (1977)", descartar la versión corta.
+        resultado = [
+            m for m in encontradas
+            if not any(m != otro and m in otro for otro in encontradas)
+        ]
+        return resultado
 
     @staticmethod
     def _dividir_en_bloques(texto: str, max_chars: int = 7000) -> list[str]:
@@ -341,6 +375,24 @@ class EntidadExtractionService:
 
         logger.info("bloques_generados", total=len(bloques))
         return [b for b in bloques if b]
+
+    @staticmethod
+    def _extraer_oracion_fallback(bloque: str, texto_cita: str) -> str:
+        """
+        Extrae el fragmento mínimo que rodea a texto_cita cuando el LLM
+        devuelve un fragmento vacío o igual a la cita misma.
+        Toma hasta 300 chars anteriores a la cita y busca el último punto
+        para delimitar el inicio de la oración.
+        """
+        pos = bloque.find(texto_cita)
+        if pos == -1:
+            return ""
+        inicio = max(0, pos - 300)
+        fragmento = bloque[inicio: pos + len(texto_cita)]
+        corte = fragmento.rfind(". ", 0, pos - inicio)
+        if corte != -1:
+            fragmento = fragmento[corte + 2:]
+        return fragmento.strip()[:800]
 
     @staticmethod
     def _parsear_json(texto: str) -> list[dict]:

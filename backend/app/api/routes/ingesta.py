@@ -114,15 +114,17 @@ async def cargar_pdf(archivo: UploadFile = File(...)):
 
 @router.post(
     "/{documento_id}/verificar",
-    summary="HU-VER: Iniciar verificación externa de citas seleccionadas",
+    summary="HU-VER: Iniciar verificación externa de referencias seleccionadas",
 )
 async def iniciar_verificacion(documento_id: str, solicitud: VerificacionSolicitud):
     """
-    Recibe los IDs de las citas seleccionadas por el usuario, deduce las referencias
-    únicas vinculadas a ellas y arranca la verificación externa (CrossRef + Unpaywall).
+    Recibe los IDs de las referencias seleccionadas por el usuario y arranca
+    la verificación externa (CrossRef + Unpaywall) directamente sobre ellas.
+    Las citas obtienen cobertura de paper a través de su referencia vinculada.
     """
     progreso = _leer_progreso(documento_id)
-    if not progreso or progreso.estado != EstadoIngesta.LISTO_EXTRACCION:
+    estados_validos = {EstadoIngesta.LISTO_EXTRACCION, EstadoIngesta.COMPLETADO}
+    if not progreso or progreso.estado not in estados_validos:
         raise HTTPException(
             status_code=400,
             detail={
@@ -132,19 +134,28 @@ async def iniciar_verificacion(documento_id: str, solicitud: VerificacionSolicit
             },
         )
 
-    if not solicitud.cita_ids:
+    if not solicitud.referencia_ids:
         raise HTTPException(
             status_code=400,
             detail={
-                "codigo": "SIN_CITAS",
-                "mensaje": "Debes seleccionar al menos una cita para verificar.",
-                "accion_sugerida": "Selecciona una o más citas en la lista.",
+                "codigo": "SIN_REFERENCIAS",
+                "mensaje": "Debes seleccionar al menos una referencia para verificar.",
+                "accion_sugerida": "Selecciona una o más referencias en la lista.",
             },
         )
 
+    # Mark as VERIFICANDO before launching the thread so the SSE stream,
+    # which connects right after this response, sees a non-terminal state.
+    _guardar_progreso(ProgresoAuditoriaResponse(
+        documento_id=documento_id,
+        estado=EstadoIngesta.VERIFICANDO,
+        porcentaje=0,
+        mensaje_progreso="Iniciando verificación...",
+    ))
+
     hilo = threading.Thread(
         target=_ejecutar_verificacion,
-        args=(documento_id, solicitud.cita_ids),
+        args=(documento_id, solicitud.referencia_ids),
         daemon=True,
     )
     hilo.start()
@@ -307,7 +318,7 @@ def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
 
 # ── Pipeline fase 2: verificación externa ────────────────────────────────────
 
-def _ejecutar_verificacion(documento_id: str, cita_ids: list[str]) -> None:
+def _ejecutar_verificacion(documento_id: str, referencia_ids: list[str]) -> None:
     import logging
     from app.services.grafo.neo4j_service import neo4j_service
     from app.services.externo.verificacion_service import verificacion_service
@@ -325,18 +336,19 @@ def _ejecutar_verificacion(documento_id: str, cita_ids: list[str]) -> None:
         ))
 
     try:
-        actualizar(10, "Buscando referencias vinculadas a las citas seleccionadas...")
+        actualizar(10, "Cargando referencias seleccionadas...")
 
-        # Obtener referencias únicas a partir de las citas seleccionadas
+        # Consulta directa sobre las referencias por ID — sin JOIN por citas.
+        # Las citas obtienen cobertura de paper a través de su Referencia vinculada.
         query = """
-        MATCH (c:Cita)-[:CITA_A]->(r:Referencia)
-        WHERE c.id IN $cita_ids
+        MATCH (r:Referencia)
+        WHERE r.id IN $referencia_ids
         OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
-        RETURN DISTINCT r, collect(a.nombre) AS autores
+        RETURN r, collect(a.nombre) AS autores
         """
         referencias_seleccionadas: list[ReferenciaAPA] = []
         with neo4j_service.driver.session(database=settings.neo4j_database) as session:
-            result = session.run(query, cita_ids=cita_ids)
+            result = session.run(query, referencia_ids=referencia_ids)
             for record in result:
                 r = record["r"]
                 referencias_seleccionadas.append(ReferenciaAPA(
@@ -351,14 +363,14 @@ def _ejecutar_verificacion(documento_id: str, cita_ids: list[str]) -> None:
                 ))
 
         total = len(referencias_seleccionadas)
-        _log.info(f"[verificacion] referencias_unicas={total} doc_id={documento_id}")
+        _log.info(f"[verificacion] referencias={total} doc_id={documento_id}")
 
         if total == 0:
             _guardar_progreso(ProgresoAuditoriaResponse(
                 documento_id=documento_id,
                 estado=EstadoIngesta.COMPLETADO,
                 porcentaje=100,
-                mensaje_progreso="No se encontraron referencias vinculadas. Pipeline completado.",
+                mensaje_progreso="No se encontraron las referencias indicadas. Pipeline completado.",
             ))
             return
 

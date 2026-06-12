@@ -13,11 +13,9 @@ function descargarBlob(blob, nombre) {
 }
 
 const METRICAS = [
-  { key: 'faithfulness_promedio',       label: 'Faithfulness'       },
-  { key: 'answer_relevancy_promedio',   label: 'Answer Relevancy'   },
-  { key: 'context_precision_promedio',  label: 'Context Precision'  },
-  { key: 'context_recall_promedio',     label: 'Context Recall'     },
-  { key: 'answer_correctness_promedio', label: 'Answer Correctness' },
+  { key: 'faithfulness_promedio',      label: 'Faithfulness',      desc: '¿La auditoría está anclada en el paper sin alucinar?' },
+  { key: 'answer_relevancy_promedio',  label: 'Answer Relevancy',  desc: '¿El veredicto es relevante al claim verificado?' },
+  { key: 'context_precision_promedio', label: 'Context Precision', desc: '¿El fragmento recuperado es pertinente al claim?' },
 ]
 
 function colorScore(valor) {
@@ -37,7 +35,7 @@ export default function MetricasRagas({ documentoId, metricas, onMetricasActuali
     setError(null)
     try {
       const res = await auditoriaAPI.exportarMetricasExcel(documentoId)
-      descargarBlob(res.data, `ragas_${documentoId}.xlsx`)
+      descargarBlob(res.data, `informe_${documentoId}.xlsx`)
     } catch {
       setError('No se pudo descargar el Excel. Verifica que haya métricas calculadas.')
     } finally {
@@ -68,8 +66,9 @@ export default function MetricasRagas({ documentoId, metricas, onMetricasActuali
           marginBottom: '1rem',
           lineHeight: 1.5,
         }}>
-          RAGAS evalúa la calidad de la auditoría con 5 métricas semánticas
-          sobre las citas que tienen fragmento de paper disponible.
+          Evalúa la calidad del sistema con 3 métricas semánticas sobre las citas
+          que tienen fragmento de paper disponible. El Excel incluye el informe
+          completo con todas las citas, veredictos y métricas.
         </div>
 
         {evaluando ? (
@@ -113,6 +112,35 @@ export default function MetricasRagas({ documentoId, metricas, onMetricasActuali
           </button>
         )}
 
+        <div style={{ marginTop: '1rem' }}>
+          <button
+            onClick={descargarExcel}
+            disabled={descargando}
+            style={{
+              padding: '0.5rem 1rem',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--accent)',
+              background: 'var(--accent-subtle)',
+              color: 'var(--accent)',
+              fontSize: '0.8rem',
+              fontWeight: 600,
+              cursor: descargando ? 'not-allowed' : 'pointer',
+              fontFamily: 'var(--font-sans)',
+              opacity: descargando ? 0.5 : 1,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '0.4rem',
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            {descargando ? 'Descargando...' : 'Descargar informe Excel'}
+          </button>
+        </div>
+
         {error && (
           <div style={{
             marginTop: '1rem',
@@ -146,7 +174,7 @@ export default function MetricasRagas({ documentoId, metricas, onMetricasActuali
         flexDirection: 'column',
         gap: '0.75rem',
       }}>
-        {METRICAS.map(({ key, label }) => {
+        {METRICAS.map(({ key, label, desc }) => {
           const valor = metricas[key]
           const color = colorScore(valor)
           const porcentaje = valor != null ? Math.max(0, Math.min(1, valor)) * 100 : 0
@@ -160,21 +188,24 @@ export default function MetricasRagas({ documentoId, metricas, onMetricasActuali
               <div style={{
                 display: 'flex',
                 justifyContent: 'space-between',
-                alignItems: 'center',
+                alignItems: 'flex-start',
                 marginBottom: '0.4rem',
+                gap: '0.5rem',
               }}>
-                <div style={{
-                  fontSize: '0.82rem',
-                  color: 'var(--text-secondary)',
-                  fontWeight: 500,
-                }}>
-                  {label}
+                <div>
+                  <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', fontWeight: 500 }}>
+                    {label}
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '0.1rem' }}>
+                    {desc}
+                  </div>
                 </div>
                 <div style={{
                   fontSize: '0.85rem',
                   fontWeight: 700,
                   color: color,
                   fontFamily: 'var(--font-mono)',
+                  flexShrink: 0,
                 }}>
                   {valor != null ? valor.toFixed(3) : '—'}
                 </div>
@@ -219,34 +250,32 @@ export default function MetricasRagas({ documentoId, metricas, onMetricasActuali
           {evaluando ? 'Re-evaluando...' : 'Volver a evaluar'}
         </button>
 
-        {metricas.total_evaluadas > 0 && (
-          <button
-            onClick={descargarExcel}
-            disabled={descargando || evaluando}
-            style={{
-              padding: '0.5rem 1rem',
-              borderRadius: 'var(--radius-md)',
-              border: '1px solid var(--border)',
-              background: 'transparent',
-              color: 'var(--text-secondary)',
-              fontSize: '0.8rem',
-              fontWeight: 500,
-              cursor: (descargando || evaluando) ? 'not-allowed' : 'pointer',
-              fontFamily: 'var(--font-sans)',
-              opacity: (descargando || evaluando) ? 0.5 : 1,
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.4rem',
-            }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-              <polyline points="7 10 12 15 17 10"/>
-              <line x1="12" y1="15" x2="12" y2="3"/>
-            </svg>
-            {descargando ? 'Descargando...' : 'Descargar Excel'}
-          </button>
-        )}
+        <button
+          onClick={descargarExcel}
+          disabled={descargando || evaluando}
+          style={{
+            padding: '0.5rem 1rem',
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid var(--accent)',
+            background: 'var(--accent-subtle)',
+            color: 'var(--accent)',
+            fontSize: '0.8rem',
+            fontWeight: 600,
+            cursor: (descargando || evaluando) ? 'not-allowed' : 'pointer',
+            fontFamily: 'var(--font-sans)',
+            opacity: (descargando || evaluando) ? 0.5 : 1,
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.4rem',
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="7 10 12 15 17 10"/>
+            <line x1="12" y1="15" x2="12" y2="3"/>
+          </svg>
+          {descargando ? 'Descargando...' : 'Descargar informe Excel'}
+        </button>
       </div>
 
       {error && (

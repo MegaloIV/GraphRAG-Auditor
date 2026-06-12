@@ -1,6 +1,7 @@
+import tempfile
 from pathlib import Path
 import structlog
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.core.config import get_settings
 from app.models.grafo import ReferenciasResponse, CitasResponse, ResumenGrafo, ReferenciaAPA, CitaEnTexto, TipoCita
@@ -41,6 +42,7 @@ async def ver_referencias(documento_id: str):
                     doi=r.get("doi_verificado") or r.get("doi"),
                     datos_incompletos=r.get("datos_incompletos", False),
                     campos_faltantes=[],
+                    nivel_confianza=r.get("nivel_confianza"),
                 ))
 
         if not referencias:
@@ -148,3 +150,199 @@ async def ver_resumen_grafo(documento_id: str):
             grafo_robusto=False,
             error="No se pudo obtener el resumen del grafo.",
         )
+
+
+@router.get(
+    "/{documento_id}/grafo-visual",
+    summary="Nodos y relaciones del grafo para visualización interactiva",
+)
+async def ver_grafo_visual(documento_id: str):
+    """
+    Retorna nodes[] y links[] con el estado actual del grafo en Neo4j.
+    Los nodos Referencia incluyen nivel_confianza para colorear por fase.
+    """
+    try:
+        nodes: list[dict] = []
+        links: list[dict] = []
+        seen: set[str] = set()
+
+        with neo4j_service.driver.session() as session:
+            # Documento
+            rec_doc = session.run(
+                "MATCH (d:Documento {id: $id}) RETURN d", id=documento_id
+            ).single()
+            if not rec_doc:
+                raise HTTPException(status_code=404, detail={
+                    "codigo": "DOCUMENTO_NO_ENCONTRADO",
+                    "mensaje": "Documento no encontrado.",
+                    "accion_sugerida": "Verifica el ID.",
+                })
+            d = rec_doc["d"]
+            nodes.append({"id": documento_id, "tipo": "Documento",
+                          "label": d.get("nombre_archivo", "Documento")})
+            seen.add(documento_id)
+
+            # Referencias y sus autores
+            for rec in session.run(
+                """
+                MATCH (d:Documento {id: $id})-[:TIENE_REFERENCIA]->(r:Referencia)
+                OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
+                RETURN r, collect(DISTINCT a) AS autores
+                """,
+                id=documento_id,
+            ):
+                r      = rec["r"]
+                ref_id = r["id"]
+                if ref_id not in seen:
+                    autores_lista = [a["nombre"] for a in rec["autores"] if a]
+                    apellido = autores_lista[0].split(",")[0] if autores_lista else "?"
+                    anio     = r.get("anio") or ""
+                    nodes.append({
+                        "id":              ref_id,
+                        "tipo":            "Referencia",
+                        "label":           f"{apellido} ({anio})" if anio else apellido,
+                        "titulo":          r.get("titulo", ""),
+                        "nivel_confianza": r.get("nivel_confianza"),
+                    })
+                    seen.add(ref_id)
+                    links.append({"source": documento_id, "target": ref_id,
+                                  "tipo": "TIENE_REFERENCIA"})
+
+                for a in rec["autores"]:
+                    if not a:
+                        continue
+                    autor_id = a["nombre_normalizado"]
+                    if autor_id not in seen:
+                        nodes.append({"id": autor_id, "tipo": "Autor",
+                                      "label": a.get("nombre", autor_id)})
+                        seen.add(autor_id)
+                    links.append({"source": ref_id, "target": autor_id,
+                                  "tipo": "ESCRITO_POR"})
+
+            # Citas y su vínculo CITA_A
+            for rec in session.run(
+                """
+                MATCH (d:Documento {id: $id})-[:TIENE_CITA]->(c:Cita)
+                OPTIONAL MATCH (c)-[:CITA_A]->(r:Referencia)
+                RETURN c, r.id AS ref_id
+                """,
+                id=documento_id,
+            ):
+                c       = rec["c"]
+                cita_id = c["id"]
+                if cita_id not in seen:
+                    nodes.append({
+                        "id":       cita_id,
+                        "tipo":     "Cita",
+                        "label":    c.get("texto", "Cita"),
+                        "tipo_cita": c.get("tipo", "parentetica"),
+                    })
+                    seen.add(cita_id)
+                    links.append({"source": documento_id, "target": cita_id,
+                                  "tipo": "TIENE_CITA"})
+                if rec["ref_id"]:
+                    links.append({"source": cita_id, "target": rec["ref_id"],
+                                  "tipo": "CITA_A"})
+
+        return {"nodes": nodes, "links": links}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("error_grafo_visual", doc_id=documento_id, error=str(e))
+        raise HTTPException(status_code=500, detail={
+            "codigo": "ERROR_INTERNO",
+            "mensaje": str(e),
+            "accion_sugerida": "Intenta nuevamente.",
+        })
+
+
+@router.post(
+    "/{documento_id}/referencias/{referencia_id}/paper",
+    summary="HU-VER: Subir paper manualmente para una referencia no encontrada",
+)
+async def subir_paper_manual(
+    documento_id: str,
+    referencia_id: str,
+    archivo: UploadFile = File(...),
+):
+    """
+    Permite al usuario adjuntar el PDF de un paper cuando CrossRef/Unpaywall
+    no lo encontraron automáticamente. El texto se extrae, se genera el embedding
+    y se indexa en Supabase. El nodo Referencia se actualiza en Neo4j.
+    """
+    from app.services.externo.embedding_service import embedding_service
+    import pymupdf4llm
+
+    contenido = await archivo.read()
+    if len(contenido) < 100:
+        raise HTTPException(
+            status_code=422,
+            detail={"codigo": "ARCHIVO_INVALIDO", "mensaje": "El archivo parece estar vacío.", "accion_sugerida": "Sube un PDF válido."},
+        )
+
+    # Obtener metadatos de la referencia desde Neo4j
+    try:
+        query_ref = "MATCH (r:Referencia {id: $ref_id}) RETURN r"
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            result = session.run(query_ref, ref_id=referencia_id)
+            record = result.single()
+            if not record:
+                raise HTTPException(status_code=404, detail={"codigo": "REFERENCIA_NO_ENCONTRADA", "mensaje": "No se encontró la referencia.", "accion_sugerida": "Verifica el ID de la referencia."})
+            r = record["r"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"codigo": "ERROR_NEO4J", "mensaje": str(e), "accion_sugerida": "Intenta nuevamente."})
+
+    # Guardar PDF en archivo temporal, extraer texto
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(contenido)
+            tmp_path = tmp.name
+
+        texto = pymupdf4llm.to_markdown(tmp_path)
+        Path(tmp_path).unlink(missing_ok=True)
+
+        if not texto or len(texto.strip()) < 100:
+            raise HTTPException(
+                status_code=422,
+                detail={"codigo": "PDF_SIN_TEXTO", "mensaje": "No se pudo extraer texto del PDF.", "accion_sugerida": "Asegúrate de que el PDF no sea una imagen escaneada."},
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=422, detail={"codigo": "ERROR_EXTRACCION", "mensaje": f"Error al procesar el PDF: {str(e)}", "accion_sugerida": "Intenta con otro archivo."})
+
+    # Indexar en Supabase con doi sintético basado en referencia_id
+    doi_manual = f"manual_{referencia_id}"
+    metadata = {
+        "doi": doi_manual,
+        "doi_normalizado": doi_manual.replace("/", "_").replace(".", "_"),
+        "titulo": r.get("titulo", "Paper subido manualmente"),
+        "anio": str(r.get("anio") or ""),
+        "nivel_confianza": "manual",
+        "referencia_id": referencia_id,
+    }
+
+    try:
+        embedding_service.indexar_paper(doi=doi_manual, texto=texto, metadata=metadata)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"codigo": "ERROR_INDEXADO", "mensaje": f"Error al indexar el paper: {str(e)}", "accion_sugerida": "Intenta nuevamente."})
+
+    # Actualizar Neo4j
+    try:
+        query_update = """
+        MATCH (r:Referencia {id: $ref_id})
+        SET r.nivel_confianza = 'manual',
+            r.doi_verificado = $doi_manual,
+            r.verificado = true,
+            r.verificado_en = datetime()
+        """
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            session.run(query_update, ref_id=referencia_id, doi_manual=doi_manual)
+    except Exception as e:
+        logger.error("error_actualizar_neo4j_manual", ref_id=referencia_id, error=str(e))
+
+    logger.info("paper_manual_indexado", ref_id=referencia_id, doi=doi_manual)
+    return {"nivel_confianza": "manual", "doi": doi_manual, "mensaje": "Paper indexado correctamente."}

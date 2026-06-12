@@ -63,9 +63,9 @@ class ProgresoAuditoriaResponse(BaseModel):
     error: Optional[str] = None
 
 
-# HU-VER: Solicitud de verificación externa con citas seleccionadas
+# HU-VER: Solicitud de verificación externa con referencias seleccionadas
 class VerificacionSolicitud(BaseModel):
-    cita_ids: list[str]
+    referencia_ids: list[str]
 
 
 # RN-002: Formato estándar de errores (sin detalles técnicos internos)

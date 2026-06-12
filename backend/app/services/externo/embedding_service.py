@@ -41,7 +41,7 @@ _RE_SECTION_FINAL = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-MAX_CHUNK_CHARS = 1500
+MAX_CHUNK_CHARS = 2500
 
 _RE_URL = re.compile(r'https?://\S+', re.IGNORECASE)
 _RE_EMAIL = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')

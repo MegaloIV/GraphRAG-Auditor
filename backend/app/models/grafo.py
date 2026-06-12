@@ -18,6 +18,7 @@ class ReferenciaAPA(BaseModel):
     doi: Optional[str] = None
     datos_incompletos: bool = False
     campos_faltantes: list[str] = Field(default_factory=list)
+    nivel_confianza: Optional[str] = None
 
 
 # HU-004: Respuesta con todas las referencias del documento

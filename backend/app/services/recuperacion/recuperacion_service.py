@@ -157,6 +157,7 @@ class RecuperacionService:
         documento_id: str,
         cita_id: str,
         n_fragmentos: int = 3,
+        fragmento_oracion: str = "",
     ) -> ResultadoRecuperacion:
         """
         Recupera la evidencia para una cita específica.
@@ -197,7 +198,8 @@ class RecuperacionService:
         # Paso 3: búsqueda vectorial en Supabase (solo si hay DOI)
         if doi and texto_cita:
             doi_normalizado = doi.replace("/", "_").replace(".", "_")
-            embedding_vec = embedding_service.modelo.encode(texto_cita).tolist()
+            query = fragmento_oracion.strip() or texto_cita
+            embedding_vec = embedding_service.modelo.encode(query).tolist()
             fragmentos = supabase_vector_service.buscar_similares(
                 embedding=embedding_vec,
                 doi_normalizado=doi_normalizado,
@@ -209,6 +211,10 @@ class RecuperacionService:
                 pagina_paper = mejor.get("pagina")
                 chunk_index  = mejor.get("chunk_index")
 
+                contenido_concat = "\n\n---\n\n".join(
+                    f["contenido"] for f in fragmentos
+                )[:3000]
+
                 logger.debug(
                     "chunk_recuperado",
                     cita_id=cita_id,
@@ -216,12 +222,13 @@ class RecuperacionService:
                     pagina_paper=pagina_paper,
                     chunk_index=chunk_index,
                     similitud=mejor["similitud"],
+                    chunks_concatenados=len(fragmentos),
                 )
 
                 return ResultadoRecuperacion(
                     cita_id=cita_id,
                     texto_cita=texto_cita,
-                    fragmento_relevante=mejor["contenido"],
+                    fragmento_relevante=contenido_concat,
                     similitud=float(mejor["similitud"]),
                     nodos_grafo=nodos,
                     doi_referencia=doi,
