@@ -1,5 +1,4 @@
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,10 +21,13 @@ async def lifespan(app: FastAPI):
     # ── Arranque ──────────────────────────────────────────────
     logger.info("iniciando_servidor", env=settings.app_env)
 
-    # Crear carpetas necesarias si no existen
-    Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
-    Path(settings.processed_dir).mkdir(parents=True, exist_ok=True)
-    Path("./logs").mkdir(exist_ok=True)
+    # Inicializar tabla de progreso del pipeline en Supabase Postgres
+    if settings.supabase_db_host and settings.supabase_db_password:
+        try:
+            from app.services.ingesta.progreso_repository import progreso_repository
+            progreso_repository.inicializar_schema()
+        except Exception as e:
+            logger.warning("progreso_schema_no_inicializado", error=str(e))
 
     # Inicializar schema de Neo4j
     if settings.neo4j_uri and settings.neo4j_password:

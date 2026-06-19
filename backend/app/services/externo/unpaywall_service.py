@@ -10,6 +10,7 @@ Flujo:
 4. Si no → retorna None (usaremos el abstract de CrossRef)
 """
 import time
+import tempfile
 import httpx
 import structlog
 from dataclasses import dataclass
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.core.config import get_settings
+from app.services.storage.supabase_storage_service import storage_service
 
 
 logger = structlog.get_logger(__name__)
@@ -119,22 +121,21 @@ class UnpaywallService:
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Descarga el PDF y extrae su texto con pymupdf4llm.
-        Retorna (texto_extraido, ruta_local).
+        El texto extraído se cachea en Supabase Storage (objeto papers/<doi>.txt);
+        el PDF se procesa en un archivo temporal y no se conserva.
+        Retorna (texto_extraido, clave_objeto).
         """
-        # Crear carpeta de papers si no existe
-        papers_dir = Path(settings.processed_dir) / "papers"
-        papers_dir.mkdir(parents=True, exist_ok=True)
-
-        # Nombre de archivo basado en DOI normalizado
+        # Clave de objeto basada en DOI normalizado
         doi_normalizado = doi.replace("/", "_").replace(".", "_")
-        ruta_pdf = papers_dir / f"{doi_normalizado}.pdf"
-        ruta_txt = papers_dir / f"{doi_normalizado}.txt"
+        objeto_txt = f"papers/{doi_normalizado}.txt"
 
-        # Si ya fue descargado antes, usar el cache
-        if ruta_txt.exists():
+        # Si ya fue descargado antes, usar el cache en la nube
+        texto_cache = storage_service.leer_texto(objeto_txt)
+        if texto_cache is not None:
             logger.info("unpaywall_usando_cache", doi=doi)
-            return ruta_txt.read_text(encoding="utf-8"), str(ruta_txt)
+            return texto_cache, objeto_txt
 
+        ruta_pdf_tmp: Optional[Path] = None
         try:
             # Descargar PDF
             logger.info("unpaywall_descargando", url=url_pdf[:60])
@@ -149,37 +150,37 @@ class UnpaywallService:
                 logger.warning("unpaywall_no_es_pdf", url=url_pdf[:60])
                 return None, None
 
-            # Guardar PDF
-            ruta_pdf.write_bytes(response.content)
+            # Guardar PDF en un archivo temporal local (pymupdf necesita una ruta)
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(response.content)
+                ruta_pdf_tmp = Path(tmp.name)
 
             # Extraer texto con pymupdf4llm
             import pymupdf4llm
-            texto = pymupdf4llm.to_markdown(str(ruta_pdf))
+            texto = pymupdf4llm.to_markdown(str(ruta_pdf_tmp))
 
             if len(texto.strip()) < 100:
                 logger.warning("unpaywall_texto_muy_corto", doi=doi)
-                ruta_pdf.unlink(missing_ok=True)
                 return None, None
 
-            # Guardar texto extraído
-            ruta_txt.write_text(texto, encoding="utf-8")
-
-            # Eliminar PDF para ahorrar espacio, conservar solo el texto
-            ruta_pdf.unlink(missing_ok=True)
+            # Guardar texto extraído en la nube
+            storage_service.subir_texto(objeto_txt, texto)
 
             logger.info(
                 "unpaywall_texto_extraido",
                 doi=doi,
                 chars=len(texto),
-                ruta=str(ruta_txt),
+                objeto=objeto_txt,
             )
 
-            return texto, str(ruta_txt)
+            return texto, objeto_txt
 
         except Exception as e:
             logger.error("unpaywall_extraccion_fallida", doi=doi, error=str(e))
-            ruta_pdf.unlink(missing_ok=True)
             return None, None
+        finally:
+            if ruta_pdf_tmp is not None:
+                ruta_pdf_tmp.unlink(missing_ok=True)
 
     def cerrar(self):
         self._cliente.close()

@@ -7,6 +7,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
     # App
@@ -38,10 +39,13 @@ class Settings(BaseSettings):
     supabase_db_user: str = "postgres"
     supabase_db_password: str = ""
 
+    # Supabase Storage (S3 / object storage en la nube)
+    supabase_url: str = ""               # URL del proyecto: https://<ref>.supabase.co
+    supabase_service_key: str = ""       # service_role key (no exponer en frontend)
+    supabase_storage_bucket: str = "graphrag-auditor"
+
     # Ingesta
     max_pdf_size_mb: int = 10
-    upload_dir: str = "./data/uploads"
-    processed_dir: str = "./data/processed"
 
     # Logging
     log_level: str = "INFO"

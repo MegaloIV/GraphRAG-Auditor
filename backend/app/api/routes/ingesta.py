@@ -16,32 +16,24 @@ from app.models.ingesta import (
     VerificacionSolicitud,
 )
 from app.services.ingesta.pdf_service import pdf_service, PDFNoProcessableError
+from app.services.ingesta.progreso_repository import progreso_repository
+from app.services.storage.supabase_storage_service import storage_service
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
 router = APIRouter(prefix="/ingesta", tags=["Ingesta"])
 
-PROGRESO_DIR = Path("./data/progreso")
+
+def _objeto_pdf(documento_id: str) -> str:
+    return f"uploads/{documento_id}.pdf"
 
 
 def _guardar_progreso(progreso: ProgresoAuditoriaResponse) -> None:
-    PROGRESO_DIR.mkdir(parents=True, exist_ok=True)
-    ruta = PROGRESO_DIR / f"{progreso.documento_id}.json"
-    ruta.write_text(progreso.model_dump_json(), encoding="utf-8")
+    progreso_repository.guardar(progreso)
 
 
 def _leer_progreso(documento_id: str) -> ProgresoAuditoriaResponse | None:
-    ruta = PROGRESO_DIR / f"{documento_id}.json"
-    if not ruta.exists():
-        return None
-    try:
-        contenido = ruta.read_text(encoding="utf-8").strip()
-        if not contenido:
-            return None
-        datos = json.loads(contenido)
-        return ProgresoAuditoriaResponse(**datos)
-    except (json.JSONDecodeError, Exception):
-        return None
+    return progreso_repository.leer(documento_id)
 
 
 @router.post(
@@ -68,15 +60,18 @@ async def cargar_pdf(archivo: UploadFile = File(...)):
         )
 
     documento_id = str(uuid.uuid4())
-    upload_dir = Path(settings.upload_dir)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    ruta_pdf = upload_dir / f"{documento_id}.pdf"
-    ruta_pdf.write_bytes(contenido)
+
+    # Guardar el PDF en la nube (Supabase Storage) y obtener una ruta local
+    # temporal para el procesamiento con PyMuPDF.
+    storage_service.subir_bytes(
+        _objeto_pdf(documento_id), contenido, content_type="application/pdf"
+    )
+    ruta_pdf = storage_service.obtener_local(_objeto_pdf(documento_id))
 
     try:
         _, num_paginas = pdf_service.extraer_texto(ruta_pdf)
     except PDFNoProcessableError as e:
-        ruta_pdf.unlink(missing_ok=True)
+        storage_service.eliminar(_objeto_pdf(documento_id))
         raise HTTPException(
             status_code=422,
             detail={
@@ -169,9 +164,9 @@ async def iniciar_verificacion(documento_id: str, solicitud: VerificacionSolicit
     summary="HU-002: Ver estructura detectada del documento",
 )
 async def ver_estructura(documento_id: str):
-    ruta_pdf = Path(settings.upload_dir) / f"{documento_id}.pdf"
+    ruta_pdf = storage_service.obtener_local(_objeto_pdf(documento_id))
 
-    if not ruta_pdf.exists():
+    if ruta_pdf is None:
         raise HTTPException(
             status_code=404,
             detail={
