@@ -57,12 +57,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: permite que el frontend en localhost:5173 se comunique con el backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
         "http://localhost:3000",
+        "https://graph-rag-auditor.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
