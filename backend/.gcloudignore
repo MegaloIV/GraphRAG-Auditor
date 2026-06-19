@@ -1,0 +1,33 @@
+.gcloudignore
+.git/
+.gitignore
+
+# Entornos virtuales (la mayor parte del 1.4 GiB)
+.venv/
+venv/
+node_modules/
+
+# Secretos
+.env
+.env.*
+Keys/
+
+# Artefactos
+__pycache__/
+*.pyc
+*.pyo
+dist/
+*.log
+logs/
+
+# Tests
+tests/
+test_*.py
+.pytest_cache/
+
+# SQL y datos locales
+sql/
+data/
+
+# Docs
+*.md
