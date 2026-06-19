@@ -245,9 +245,17 @@ cp .env.example .env             # editar con tus credenciales
 #   doi         TEXT,
 #   chunk_index INTEGER,
 #   texto       TEXT,
-#   embedding   vector(384)
+#   embedding   vector(1536)   -- text-embedding-3-small (OpenAI)
 # );
 # CREATE INDEX ON papers_chunks USING ivfflat (embedding vector_cosine_ops);
+#
+# Migración desde el modelo local (vector(384) → vector(1536)):
+# Los embeddings de 384 dims son incompatibles. Vacía y recrea la columna,
+# luego re-indexa los papers (re-verificando las referencias):
+#   TRUNCATE papers_chunks;
+#   ALTER TABLE papers_chunks DROP COLUMN embedding;
+#   ALTER TABLE papers_chunks ADD COLUMN embedding vector(1536);
+#   CREATE INDEX ON papers_chunks USING ivfflat (embedding vector_cosine_ops);
 ```
 
 ### Frontend

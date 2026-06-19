@@ -1,24 +1,32 @@
 """
-Servicio de embeddings con sentence-transformers + Supabase (pgvector).
+Servicio de embeddings con OpenAI + Supabase (pgvector).
 Genera embeddings del texto de cada paper y los almacena en Supabase
 para búsqueda semántica en EP-003.
 
-Modelo: all-MiniLM-L6-v2 (gratuito, corre local, 80 MB)
-- 384 dimensiones
-- Muy rápido
-- Bueno para textos académicos en inglés
+Modelo: text-embedding-3-small (OpenAI, API de pago)
+- 1536 dimensiones
+- Llamada remota (requiere OPENAI_API_KEY y red)
+- Vectores normalizados (norma 1) → la distancia coseno funciona directa
 """
 import re
+import time
 import structlog
 from typing import Optional
 
-from sentence_transformers import SentenceTransformer
+from openai import OpenAI
 
+from app.core.config import get_settings
 from app.services.vectorstore.supabase_service import supabase_vector_service
 
 logger = structlog.get_logger(__name__)
 
-MODELO_EMBEDDING = "all-MiniLM-L6-v2"
+# Dimensión de text-embedding-3-small. Debe coincidir con la columna
+# `embedding vector(1536)` de la tabla papers_chunks en Supabase.
+DIM_EMBEDDING = 1536
+
+# Máximo de textos por petición a la API (evita superar el límite de tokens
+# por request). Un paper rara vez supera unas decenas de chunks.
+_MAX_BATCH = 128
 
 
 _RE_PAGE_MARKER = re.compile(
@@ -236,16 +244,47 @@ def _dividir_en_chunks(texto: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str
 class EmbeddingService:
 
     def __init__(self):
-        self._modelo: SentenceTransformer | None = None
+        self._cliente: OpenAI | None = None
 
     @property
-    def modelo(self) -> SentenceTransformer:
-        """Carga el modelo de embeddings solo cuando se necesita."""
-        if self._modelo is None:
-            logger.info("cargando_modelo_embeddings", modelo=MODELO_EMBEDDING)
-            self._modelo = SentenceTransformer(MODELO_EMBEDDING)
-            logger.info("modelo_embeddings_listo")
-        return self._modelo
+    def cliente(self) -> OpenAI:
+        """Crea el cliente OpenAI solo cuando se necesita."""
+        if self._cliente is None:
+            settings = get_settings()
+            if not settings.openai_api_key:
+                raise RuntimeError(
+                    "OPENAI_API_KEY no está configurada; es obligatoria para los embeddings."
+                )
+            self._cliente = OpenAI(api_key=settings.openai_api_key)
+        return self._cliente
+
+    @property
+    def modelo(self) -> str:
+        return get_settings().openai_embedding_model
+
+    def _embed(self, textos: list[str]) -> list[list[float]]:
+        """
+        Genera embeddings para una lista de textos con la API de OpenAI,
+        en lotes y con reintentos exponenciales. Preserva el orden de entrada.
+        """
+        if not textos:
+            return []
+
+        vectores: list[list[float]] = []
+        for inicio in range(0, len(textos), _MAX_BATCH):
+            lote = textos[inicio:inicio + _MAX_BATCH]
+            for intento in range(3):
+                try:
+                    resp = self.cliente.embeddings.create(model=self.modelo, input=lote)
+                    vectores.extend(d.embedding for d in resp.data)
+                    break
+                except Exception as e:
+                    if intento == 2:
+                        raise
+                    espera = 2 ** intento
+                    logger.warning("reintento_embedding", intento=intento + 1, espera=espera, error=str(e))
+                    time.sleep(espera)
+        return vectores
 
     def indexar_paper(
         self,
@@ -300,10 +339,10 @@ class EmbeddingService:
 
             logger.info("paper_dividido_en_chunks", doi=doi, total_chunks=len(chunks))
 
-            # Generar embeddings y construir registros para Supabase
+            # Generar embeddings (batch a la API) y construir registros para Supabase
+            embeddings = self._embed(chunks)
             registros = []
-            for idx, chunk in enumerate(chunks):
-                embedding = self.modelo.encode(chunk).tolist()
+            for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                 registros.append({
                     "id":              f"{doi_normalizado}_chunk_{idx}",
                     "doi":             doi,
@@ -347,7 +386,7 @@ class EmbeddingService:
             "similitud": float}]
         """
         try:
-            embedding = self.modelo.encode(texto_consulta).tolist()
+            embedding = self._embed([texto_consulta])[0]
             doi_normalizado = filtro_doi.replace("/", "_").replace(".", "_") if filtro_doi else None
 
             filas = supabase_vector_service.buscar_similares(
@@ -378,6 +417,10 @@ class EmbeddingService:
         except Exception as e:
             logger.error("error_busqueda_embeddings", error=str(e))
             return []
+
+    def generar_embedding(self, texto: str) -> list[float]:
+        """Genera el embedding de un único texto (consulta)."""
+        return self._embed([texto])[0]
 
     def paper_ya_indexado(self, doi: str) -> bool:
         """Verifica si un paper ya fue indexado en Supabase."""

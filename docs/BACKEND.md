@@ -40,7 +40,7 @@ PDF → [Ingesta] → [Extracción LLM] → [Grafo Neo4j] → [Verificación Ext
 | Componente | Rol |
 |---|---|
 | **Neo4j AuraDB** | Grafo de conocimiento (Documentos, Referencias, Citas, Autores) |
-| **Supabase pgvector** | Vector store para chunks de papers (embeddings 384D) |
+| **Supabase pgvector** | Vector store para chunks de papers (embeddings 1536D) |
 | **OpenAI GPT-4o-mini** | Extracción de entidades y emisión de veredictos |
 | **Groq Llama 3.3 70B** | LLM alternativo (configurable) |
 | **CrossRef API** | Verificación de existencia de referencias académicas |
@@ -103,7 +103,8 @@ Se carga desde `.env` con `pydantic-settings`. La instancia es un singleton cach
 | `GROQ_API_KEY` | str | `""` | API key de Groq |
 | `GROQ_MODEL` | str | `llama-3.3-70b-versatile` | Modelo Groq |
 | `OPENAI_API_KEY` | str | `""` | API key de OpenAI |
-| `OPENAI_MODEL` | str | `gpt-4o-mini` | Modelo OpenAI |
+| `OPENAI_MODEL` | str | `gpt-4o-mini` | Modelo OpenAI (extracción y auditoría) |
+| `OPENAI_EMBEDDING_MODEL` | str | `text-embedding-3-small` | Modelo de embeddings (1536D) |
 | `CROSSREF_EMAIL` | str | — | Email para CrossRef API (obligatorio) |
 | `NEO4J_URI` | str | `""` | URI de Neo4j AuraDB |
 | `NEO4J_USERNAME` | str | `neo4j` | Usuario Neo4j |
@@ -400,7 +401,7 @@ Busca PDFs open access vía Unpaywall API.
 
 ### `services/externo/embedding_service.py`
 
-Modelo local: `all-MiniLM-L6-v2` (384 dimensiones, carga lazy).
+Modelo: `text-embedding-3-small` de OpenAI (1536 dimensiones, vía API). Configurable con `OPENAI_EMBEDDING_MODEL`. Cliente OpenAI con carga lazy; los embeddings se generan en lotes (`_embed`, máx. 128 textos/petición) con reintentos exponenciales.
 
 **`indexar_paper(doi, texto, metadata) → bool`**
 
@@ -409,7 +410,7 @@ Pipeline de limpieza e indexación:
 2. `_dividir_en_chunks()`: por form-feed `\f`, marcadores textuales de página o por tamaño (máx. 2 500 chars).
 3. Filtra chunks basura (`_es_chunk_basura`) y portadas (`_es_chunk_portada`).
 4. Borra chunks previos del DOI en Supabase.
-5. Genera embeddings y guarda en Supabase.
+5. Genera embeddings (batch a la API de OpenAI) y guarda en Supabase.
 
 **`buscar_similares(texto_consulta, n_resultados, filtro_doi?) → list[dict]`**
 
@@ -532,7 +533,7 @@ Operaciones clave: `indexar_chunks(registros)`, `buscar_similares(embedding, doi
 
 ### Supabase pgvector
 
-Tabla de chunks de papers. Columnas principales: `id`, `doi`, `doi_normalizado`, `titulo`, `anio`, `pagina`, `chunk_index`, `nivel_confianza`, `referencia_id`, `contenido`, `embedding` (vector 384D).
+Tabla de chunks de papers. Columnas principales: `id`, `doi`, `doi_normalizado`, `titulo`, `anio`, `pagina`, `chunk_index`, `nivel_confianza`, `referencia_id`, `contenido`, `embedding` (vector 1536D).
 
 ### Sistema de archivos
 
