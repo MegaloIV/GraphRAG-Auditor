@@ -260,7 +260,7 @@ Base URL: `/api/v1`
 | `GET` | `/{doc_id}/referencias` | HU-004 | Lista de referencias desde Neo4j. |
 | `GET` | `/{doc_id}/citas` | HU-005 | Lista de citas desde Neo4j. |
 | `GET` | `/{doc_id}/resumen` | HU-006 | Resumen del grafo (nodos, relaciones, densidad). |
-| `GET` | `/{doc_id}/grafo-visual` | — | Nodos y enlaces para visualización: `{nodes[], links[]}`. Incluye `nivel_confianza` en referencias. |
+| `GET` | `/{doc_id}/grafo-visual` | — | Nodos y enlaces para visualización: `{nodes[], links[]}`. Referencias incluyen `nivel_confianza`, `anio`, `fuente`, `doi`, `score_crossref`, `autores`. Citas incluyen `pagina`, `veredicto`, `justificacion`, `similitud` y métricas RAGAS. |
 | `POST` | `/{doc_id}/referencias/{ref_id}/paper` | HU-VER | Subir PDF manualmente para una referencia no encontrada. Extrae texto, genera embedding e indexa en Supabase. |
 
 ---
@@ -469,7 +469,7 @@ Por cita (`_auditar_cita`):
 4. Si no hay fragmento → `NO_INFO`.
 5. `_llamar_llm()` → prompt con afirmación + cita APA + fragmento del paper.
 6. `_parsear_respuesta_llm()` → extrae `VERDICT:` y `JUSTIFICATION:`.
-7. Persiste veredicto en Neo4j (`_persistir_veredicto`).
+7. Persiste veredicto en Neo4j (`_persistir_veredicto`), incluyendo `similitud` (similitud coseno del mejor fragmento recuperado por el RAG).
 
 **System prompt (`SYSTEM_AUDITORIA`):** Auditor académico APA 7ma. Evalúa semántica (no idioma). Formato de respuesta: `VERDICT: <SUPPORTS|REFUTES|NO_INFO>` + `JUSTIFICATION: <oración>`.
 
@@ -483,10 +483,12 @@ Por cita (`_auditar_cita`):
 
 Evaluación con framework RAGAS (sin ground truth externo).
 
-**Métricas evaluadas:**
+**Métricas evaluadas** (todas sin ground truth):
 - `faithfulness`: ¿La respuesta del sistema está anclada en el fragmento recuperado?
 - `answer_relevancy`: ¿El veredicto es relevante al claim verificado?
-- `context_precision`: ¿El fragmento recuperado es pertinente para el claim?
+- `context_utilization`: ¿El fragmento recuperado es pertinente para el claim? Es la variante **sin referencia** de `context_precision` (usa la respuesta del auditor en lugar de un ground truth). Se persiste y expone bajo la clave `context_precision` por compatibilidad.
+
+> ⚠️ No se usa `context_precision` (con referencia): en RAGAS 0.1.x requiere la columna `ground_truth`, que este sistema no posee, y provocaba que `evaluate()` fallara y devolviera métricas nulas. `context_recall` y `answer_correctness` se excluyen por el mismo motivo.
 
 LLM: `gpt-4o-mini` vía `langchain_openai`. Embeddings: `text-embedding-3-small`.
 
@@ -516,7 +518,7 @@ Operaciones clave: `indexar_chunks(registros)`, `buscar_similares(embedding, doi
 |---|---|
 | `Documento` | `id`, `nombre_archivo`, `actualizado_en` |
 | `Referencia` | `id`, `titulo`, `anio`, `fuente`, `doi`, `doi_verificado`, `titulo_oficial`, `nivel_confianza`, `score_crossref`, `datos_incompletos`, `verificado`, `verificado_en` |
-| `Cita` | `id`, `texto`, `tipo`, `pagina`, `fragmento`, `veredicto`, `justificacion`, `fragmento_evidencia`, `pagina_paper`, `auditado_en`, `faithfulness`, `answer_relevancy`, `context_precision`, `ragas_evaluado_en` |
+| `Cita` | `id`, `texto`, `tipo`, `pagina`, `fragmento`, `veredicto`, `justificacion`, `fragmento_evidencia`, `pagina_paper`, `similitud`, `auditado_en`, `faithfulness`, `answer_relevancy`, `context_precision`, `ragas_evaluado_en` |
 | `Autor` | `nombre_normalizado` (unique), `nombre` |
 
 **Relaciones:**

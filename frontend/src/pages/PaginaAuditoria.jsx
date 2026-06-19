@@ -115,6 +115,16 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
     }
   }
 
+  // ── Recargar el grafo visual (tras auditar o evaluar RAGAS) ───
+  const recargarGrafoVisual = async () => {
+    try {
+      const grafoRes = await grafoAPI.verGrafoVisual(documentoId)
+      setGrafoVisual(grafoRes.data)
+    } catch (err) {
+      console.error('Error recargando grafo visual:', err)
+    }
+  }
+
   // ── SSE ──────────────────────────────────────────────────
   const conectarSSE = () => {
     esRef.current?.close()
@@ -170,12 +180,14 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
     try {
       const res = await auditoriaAPI.auditar(documentoId)
       setAuditoriaData(res.data)
-      const [alertasRes, alucinRes] = await Promise.all([
+      const [alertasRes, alucinRes, grafoRes] = await Promise.all([
         auditoriaAPI.verAlertas(documentoId),
         auditoriaAPI.verAlertasAlucinaciones(documentoId),
+        grafoAPI.verGrafoVisual(documentoId),
       ])
       setAlertas(alertasRes.data)
       setAlertasAlucinacion(alucinRes.data)
+      setGrafoVisual(grafoRes.data)
       setTabActiva('veredictos')
     } catch (err) {
       setErrorAuditoria(err.mensaje || 'Error al auditar el documento.')
@@ -371,7 +383,7 @@ export default function PaginaAuditoria({ documentoId, onVolver }) {
                 <MetricasRagas
                   documentoId={documentoId}
                   metricas={metricasRagas}
-                  onMetricasActualizadas={setMetricasRagas}
+                  onMetricasActualizadas={(data) => { setMetricasRagas(data); recargarGrafoVisual() }}
                 />
               </Card>
             )}

@@ -203,6 +203,11 @@ async def ver_grafo_visual(documento_id: str):
                         "label":           f"{apellido} ({anio})" if anio else apellido,
                         "titulo":          r.get("titulo", ""),
                         "nivel_confianza": r.get("nivel_confianza"),
+                        "anio":            anio or None,
+                        "fuente":          r.get("fuente"),
+                        "doi":             r.get("doi_verificado") or r.get("doi"),
+                        "score_crossref":  r.get("score_crossref"),
+                        "autores":         autores_lista,
                     })
                     seen.add(ref_id)
                     links.append({"source": documento_id, "target": ref_id,
@@ -232,10 +237,20 @@ async def ver_grafo_visual(documento_id: str):
                 cita_id = c["id"]
                 if cita_id not in seen:
                     nodes.append({
-                        "id":       cita_id,
-                        "tipo":     "Cita",
-                        "label":    c.get("texto", "Cita"),
-                        "tipo_cita": c.get("tipo", "parentetica"),
+                        "id":         cita_id,
+                        "tipo":       "Cita",
+                        "label":      c.get("texto", "Cita"),
+                        "tipo_cita":  c.get("tipo", "parentetica"),
+                        "pagina":     c.get("pagina"),
+                        "fragmento":           c.get("fragmento"),
+                        "veredicto":           c.get("veredicto"),
+                        "justificacion":       c.get("justificacion"),
+                        "fragmento_evidencia": c.get("fragmento_evidencia"),
+                        "pagina_paper":        c.get("pagina_paper"),
+                        "similitud":           c.get("similitud"),
+                        "faithfulness":        c.get("faithfulness"),
+                        "answer_relevancy":    c.get("answer_relevancy"),
+                        "context_precision":   c.get("context_precision"),
                     })
                     seen.add(cita_id)
                     links.append({"source": documento_id, "target": cita_id,
