@@ -1,6 +1,5 @@
 import logging
 import sys
-from pathlib import Path
 import structlog
 from app.core.config import get_settings
 
@@ -28,22 +27,17 @@ def setup_logging() -> None:
         foreign_pre_chain=shared_processors,
         processors=[
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            structlog.dev.ConsoleRenderer(colors=False),  # sin colores para archivo
+            structlog.dev.ConsoleRenderer(colors=False),
         ],
     )
 
-    # Handler consola
+    # Logs solo por consola (stdout); la plataforma/host se encarga de captarlos.
+    # No se escriben archivos locales: el almacenamiento es efímero en la nube.
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
 
-    # Handler archivo
-    logs_dir = Path("logs")
-    logs_dir.mkdir(exist_ok=True)
-    file_handler = logging.FileHandler(logs_dir / "app.log", encoding="utf-8")
-    file_handler.setFormatter(formatter)
-
     root_logger = logging.getLogger()
-    root_logger.handlers = [console_handler, file_handler]
+    root_logger.handlers = [console_handler]
     root_logger.setLevel(log_level)
 
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

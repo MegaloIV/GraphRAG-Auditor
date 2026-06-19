@@ -199,7 +199,7 @@ class RecuperacionService:
         if doi and texto_cita:
             doi_normalizado = doi.replace("/", "_").replace(".", "_")
             query = fragmento_oracion.strip() or texto_cita
-            embedding_vec = embedding_service.modelo.encode(query).tolist()
+            embedding_vec = embedding_service.generar_embedding(query)
             fragmentos = supabase_vector_service.buscar_similares(
                 embedding=embedding_vec,
                 doi_normalizado=doi_normalizado,
@@ -282,7 +282,7 @@ class RecuperacionService:
             return []
 
         # Buscar en Supabase sin filtro de DOI (búsqueda global)
-        embedding_vec = embedding_service.modelo.encode(texto_consulta).tolist()
+        embedding_vec = embedding_service.generar_embedding(texto_consulta)
         fragmentos_globales = supabase_vector_service.buscar_similares(
             embedding=embedding_vec,
             doi_normalizado=None,

@@ -245,9 +245,23 @@ cp .env.example .env             # editar con tus credenciales
 #   doi         TEXT,
 #   chunk_index INTEGER,
 #   texto       TEXT,
-#   embedding   vector(384)
+#   embedding   vector(1536)   -- text-embedding-3-small (OpenAI)
 # );
+#
+# 6. Crear el bucket de Storage (archivos en la nube, ya no en ./data)
+# En el Dashboard de Supabase → Storage → New bucket:
+#   nombre: graphrag-auditor   (privado)
+# La tabla de progreso (auditoria_progreso) se crea sola al arrancar.
+# Detalle en backend/sql/storage_setup.sql
 # CREATE INDEX ON papers_chunks USING ivfflat (embedding vector_cosine_ops);
+#
+# Migración desde el modelo local (vector(384) → vector(1536)):
+# Los embeddings de 384 dims son incompatibles. Vacía y recrea la columna,
+# luego re-indexa los papers (re-verificando las referencias):
+#   TRUNCATE papers_chunks;
+#   ALTER TABLE papers_chunks DROP COLUMN embedding;
+#   ALTER TABLE papers_chunks ADD COLUMN embedding vector(1536);
+#   CREATE INDEX ON papers_chunks USING ivfflat (embedding vector_cosine_ops);
 ```
 
 ### Frontend
@@ -317,9 +331,10 @@ npm run dev
 | `SUPABASE_DB_NAME` | Nombre de la base de datos | `postgres` |
 | `SUPABASE_DB_USER` | Usuario PostgreSQL | `postgres.xxxx` |
 | `SUPABASE_DB_PASSWORD` | Contraseña PostgreSQL | `...` |
+| `SUPABASE_URL` | URL del proyecto Supabase (para Storage) | `https://xxxx.supabase.co` |
+| `SUPABASE_SERVICE_KEY` | service_role key (Storage; **no exponer en frontend**) | `eyJ...` |
+| `SUPABASE_STORAGE_BUCKET` | Bucket de almacenamiento de archivos | `graphrag-auditor` |
 | `MAX_PDF_SIZE_MB` | Tamaño máximo de PDF en MB | `10` |
-| `UPLOAD_DIR` | Directorio de PDFs subidos | `./data/uploads` |
-| `PROCESSED_DIR` | Directorio de archivos procesados | `./data/processed` |
 | `LOG_LEVEL` | Nivel de logging | `INFO` |
 | `CROSSREF_EMAIL` | Email para la API de CrossRef | `tu@email.com` |
 

@@ -40,7 +40,7 @@ PDF → [Ingesta] → [Extracción LLM] → [Grafo Neo4j] → [Verificación Ext
 | Componente | Rol |
 |---|---|
 | **Neo4j AuraDB** | Grafo de conocimiento (Documentos, Referencias, Citas, Autores) |
-| **Supabase pgvector** | Vector store para chunks de papers (embeddings 384D) |
+| **Supabase pgvector** | Vector store para chunks de papers (embeddings 1536D) |
 | **OpenAI GPT-4o-mini** | Extracción de entidades y emisión de veredictos |
 | **Groq Llama 3.3 70B** | LLM alternativo (configurable) |
 | **CrossRef API** | Verificación de existencia de referencias académicas |
@@ -103,7 +103,8 @@ Se carga desde `.env` con `pydantic-settings`. La instancia es un singleton cach
 | `GROQ_API_KEY` | str | `""` | API key de Groq |
 | `GROQ_MODEL` | str | `llama-3.3-70b-versatile` | Modelo Groq |
 | `OPENAI_API_KEY` | str | `""` | API key de OpenAI |
-| `OPENAI_MODEL` | str | `gpt-4o-mini` | Modelo OpenAI |
+| `OPENAI_MODEL` | str | `gpt-4o-mini` | Modelo OpenAI (extracción y auditoría) |
+| `OPENAI_EMBEDDING_MODEL` | str | `text-embedding-3-small` | Modelo de embeddings (1536D) |
 | `CROSSREF_EMAIL` | str | — | Email para CrossRef API (obligatorio) |
 | `NEO4J_URI` | str | `""` | URI de Neo4j AuraDB |
 | `NEO4J_USERNAME` | str | `neo4j` | Usuario Neo4j |
@@ -260,7 +261,7 @@ Base URL: `/api/v1`
 | `GET` | `/{doc_id}/referencias` | HU-004 | Lista de referencias desde Neo4j. |
 | `GET` | `/{doc_id}/citas` | HU-005 | Lista de citas desde Neo4j. |
 | `GET` | `/{doc_id}/resumen` | HU-006 | Resumen del grafo (nodos, relaciones, densidad). |
-| `GET` | `/{doc_id}/grafo-visual` | — | Nodos y enlaces para visualización: `{nodes[], links[]}`. Incluye `nivel_confianza` en referencias. |
+| `GET` | `/{doc_id}/grafo-visual` | — | Nodos y enlaces para visualización: `{nodes[], links[]}`. Referencias incluyen `nivel_confianza`, `anio`, `fuente`, `doi`, `score_crossref`, `autores`. Citas incluyen `pagina`, `veredicto`, `justificacion`, `similitud` y métricas RAGAS. |
 | `POST` | `/{doc_id}/referencias/{ref_id}/paper` | HU-VER | Subir PDF manualmente para una referencia no encontrada. Extrae texto, genera embedding e indexa en Supabase. |
 
 ---
@@ -400,7 +401,7 @@ Busca PDFs open access vía Unpaywall API.
 
 ### `services/externo/embedding_service.py`
 
-Modelo local: `all-MiniLM-L6-v2` (384 dimensiones, carga lazy).
+Modelo: `text-embedding-3-small` de OpenAI (1536 dimensiones, vía API). Configurable con `OPENAI_EMBEDDING_MODEL`. Cliente OpenAI con carga lazy; los embeddings se generan en lotes (`_embed`, máx. 128 textos/petición) con reintentos exponenciales.
 
 **`indexar_paper(doi, texto, metadata) → bool`**
 
@@ -409,7 +410,7 @@ Pipeline de limpieza e indexación:
 2. `_dividir_en_chunks()`: por form-feed `\f`, marcadores textuales de página o por tamaño (máx. 2 500 chars).
 3. Filtra chunks basura (`_es_chunk_basura`) y portadas (`_es_chunk_portada`).
 4. Borra chunks previos del DOI en Supabase.
-5. Genera embeddings y guarda en Supabase.
+5. Genera embeddings (batch a la API de OpenAI) y guarda en Supabase.
 
 **`buscar_similares(texto_consulta, n_resultados, filtro_doi?) → list[dict]`**
 
@@ -469,7 +470,7 @@ Por cita (`_auditar_cita`):
 4. Si no hay fragmento → `NO_INFO`.
 5. `_llamar_llm()` → prompt con afirmación + cita APA + fragmento del paper.
 6. `_parsear_respuesta_llm()` → extrae `VERDICT:` y `JUSTIFICATION:`.
-7. Persiste veredicto en Neo4j (`_persistir_veredicto`).
+7. Persiste veredicto en Neo4j (`_persistir_veredicto`), incluyendo `similitud` (similitud coseno del mejor fragmento recuperado por el RAG).
 
 **System prompt (`SYSTEM_AUDITORIA`):** Auditor académico APA 7ma. Evalúa semántica (no idioma). Formato de respuesta: `VERDICT: <SUPPORTS|REFUTES|NO_INFO>` + `JUSTIFICATION: <oración>`.
 
@@ -483,10 +484,12 @@ Por cita (`_auditar_cita`):
 
 Evaluación con framework RAGAS (sin ground truth externo).
 
-**Métricas evaluadas:**
+**Métricas evaluadas** (todas sin ground truth):
 - `faithfulness`: ¿La respuesta del sistema está anclada en el fragmento recuperado?
 - `answer_relevancy`: ¿El veredicto es relevante al claim verificado?
-- `context_precision`: ¿El fragmento recuperado es pertinente para el claim?
+- `context_utilization`: ¿El fragmento recuperado es pertinente para el claim? Es la variante **sin referencia** de `context_precision` (usa la respuesta del auditor en lugar de un ground truth). Se persiste y expone bajo la clave `context_precision` por compatibilidad.
+
+> ⚠️ No se usa `context_precision` (con referencia): en RAGAS 0.1.x requiere la columna `ground_truth`, que este sistema no posee, y provocaba que `evaluate()` fallara y devolviera métricas nulas. `context_recall` y `answer_correctness` se excluyen por el mismo motivo.
 
 LLM: `gpt-4o-mini` vía `langchain_openai`. Embeddings: `text-embedding-3-small`.
 
@@ -516,7 +519,7 @@ Operaciones clave: `indexar_chunks(registros)`, `buscar_similares(embedding, doi
 |---|---|
 | `Documento` | `id`, `nombre_archivo`, `actualizado_en` |
 | `Referencia` | `id`, `titulo`, `anio`, `fuente`, `doi`, `doi_verificado`, `titulo_oficial`, `nivel_confianza`, `score_crossref`, `datos_incompletos`, `verificado`, `verificado_en` |
-| `Cita` | `id`, `texto`, `tipo`, `pagina`, `fragmento`, `veredicto`, `justificacion`, `fragmento_evidencia`, `pagina_paper`, `auditado_en`, `faithfulness`, `answer_relevancy`, `context_precision`, `ragas_evaluado_en` |
+| `Cita` | `id`, `texto`, `tipo`, `pagina`, `fragmento`, `veredicto`, `justificacion`, `fragmento_evidencia`, `pagina_paper`, `similitud`, `auditado_en`, `faithfulness`, `answer_relevancy`, `context_precision`, `ragas_evaluado_en` |
 | `Autor` | `nombre_normalizado` (unique), `nombre` |
 
 **Relaciones:**
@@ -530,7 +533,7 @@ Operaciones clave: `indexar_chunks(registros)`, `buscar_similares(embedding, doi
 
 ### Supabase pgvector
 
-Tabla de chunks de papers. Columnas principales: `id`, `doi`, `doi_normalizado`, `titulo`, `anio`, `pagina`, `chunk_index`, `nivel_confianza`, `referencia_id`, `contenido`, `embedding` (vector 384D).
+Tabla de chunks de papers. Columnas principales: `id`, `doi`, `doi_normalizado`, `titulo`, `anio`, `pagina`, `chunk_index`, `nivel_confianza`, `referencia_id`, `contenido`, `embedding` (vector 1536D).
 
 ### Sistema de archivos
 

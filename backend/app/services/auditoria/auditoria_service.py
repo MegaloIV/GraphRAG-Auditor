@@ -85,7 +85,8 @@ SET c.veredicto           = $veredicto,
     c.justificacion       = $justificacion,
     c.auditado_en         = datetime(),
     c.pagina_paper        = $pagina_paper,
-    c.fragmento_evidencia = $fragmento_evidencia
+    c.fragmento_evidencia = $fragmento_evidencia,
+    c.similitud           = $similitud
 """
 
 
@@ -388,6 +389,7 @@ class AuditoriaService:
                     justificacion=veredicto.justificacion,
                     pagina_paper=pagina_paper,
                     fragmento_evidencia=veredicto.fragmento_evidencia or "",
+                    similitud=float(veredicto.similitud or 0.0),
                 )
         except Exception as e:
             logger.error("error_persistiendo_veredicto", cita_id=veredicto.cita_id, error=str(e))

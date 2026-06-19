@@ -3,7 +3,7 @@ from ragas import evaluate
 from ragas.metrics import (
     faithfulness,
     answer_relevancy,
-    context_precision,
+    context_utilization,
 )
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from ragas.llms import LangchainLLMWrapper
@@ -46,12 +46,16 @@ class RagasService:
         """
         Evalúa una cita con métricas RAGAS que no requieren ground truth externo.
 
-        - faithfulness:      ¿La respuesta está anclada en los contextos (no alucina)?
-        - answer_relevancy:  ¿La respuesta es relevante al claim verificado?
-        - context_precision: ¿El fragmento recuperado es pertinente para el claim?
+        - faithfulness:        ¿La respuesta está anclada en los contextos (no alucina)?
+        - answer_relevancy:    ¿La respuesta es relevante al claim verificado?
+        - context_utilization: ¿El fragmento recuperado es pertinente para el claim?
+                               (variante de context_precision SIN referencia: usa la
+                               respuesta del auditor en lugar de un ground truth)
 
-        Se excluyen context_recall y answer_correctness porque requieren anotaciones
-        humanas de ground truth que este sistema no posee.
+        Se excluyen context_recall, answer_correctness y context_precision (con
+        referencia) porque requieren anotaciones humanas de ground truth que este
+        sistema no posee. El resultado se expone bajo la clave 'context_precision'
+        para mantener compatibilidad con el resto del pipeline.
         """
         try:
             data = {
@@ -65,7 +69,7 @@ class RagasService:
                 metrics=[
                     faithfulness,
                     answer_relevancy,
-                    context_precision,
+                    context_utilization,
                 ],
                 llm=self.llm,
                 embeddings=self.embeddings,
@@ -74,7 +78,8 @@ class RagasService:
             return {
                 "faithfulness":      _safe_float(scores, "faithfulness"),
                 "answer_relevancy":  _safe_float(scores, "answer_relevancy"),
-                "context_precision": _safe_float(scores, "context_precision"),
+                # context_utilization = context precision sin ground truth
+                "context_precision": _safe_float(scores, "context_utilization"),
             }
         except Exception as e:
             logger.warning("ragas_cita_fallida", error=str(e))

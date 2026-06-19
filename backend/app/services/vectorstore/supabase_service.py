@@ -66,7 +66,7 @@ class SupabaseVectorService:
         Devuelve los chunks más similares al embedding dado.
 
         Args:
-            embedding:       Vector de consulta (lista de floats, dim 384).
+            embedding:       Vector de consulta (lista de floats, dim 1536).
             doi_normalizado: Si se indica, restringe la búsqueda a ese paper.
                              Si es None, busca en todos los papers.
             top_k:           Máximo de resultados a devolver.

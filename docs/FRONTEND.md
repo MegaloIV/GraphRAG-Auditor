@@ -371,7 +371,7 @@ Visualización interactiva del grafo usando `ForceGraph2D` (canvas HTML5).
 |---|---|---|
 | Documento | Azul `#3b82f6` | 11 |
 | Referencia | Variable por `nivel_confianza` | 8 |
-| Cita | Ámbar `#f59e0b` | 5 |
+| Cita | Variable por `veredicto` (ámbar si no auditada) | Variable por `similitud` (3–10) |
 | Autor | Violeta `#a855f7` | 4 |
 
 **Colores de Referencia por `nivel_confianza`:**
@@ -384,12 +384,29 @@ Visualización interactiva del grafo usando `ForceGraph2D` (canvas HTML5).
 | `no_encontrado` | Rojo `#ef4444` |
 | sin valor | Gris `#6b7280` |
 
+**Colores de Cita por `veredicto`** (`colorNodo`):
+
+| Veredicto | Color |
+|---|---|
+| `SUPPORTS` | Verde `#10b981` |
+| `REFUTES` | Rojo `#ef4444` |
+| `NO_INFO` / sin auditar | Ámbar `#f59e0b` |
+
+**Tamaño de Cita por similitud** (`radioNodo`): el radio se interpola entre `RADIO_CITA_MIN` (3) y `RADIO_CITA_MAX` (10) según la `similitud` (0–1) del fragmento recuperado por el RAG. Citas más grandes = mejor evidencia encontrada. Sin valor de similitud usa el radio base (5).
+
 **Controles:**
-- Toggle "Citas": muestra/oculta nodos Cita y sus enlaces (off por defecto: autores).
+- Toggle "Referencias": muestra/oculta nodos Referencia y sus enlaces (on por defecto).
+- Toggle "Citas": muestra/oculta nodos Cita y sus enlaces (on por defecto).
 - Toggle "Autores": muestra/oculta nodos Autor y sus enlaces (off por defecto).
+- Filtro de veredicto (`FILTROS_VEREDICTO`): segmentado **Todos / SUPPORTS / REFUTES / NO_INFO / Sin auditar** que filtra los nodos Cita por su `veredicto` (`sin_auditar` = citas sin veredicto). Solo se muestra cuando el toggle "Citas" está activo.
+
+El filtrado vive en el `useMemo` de `graphData`: descarta nodos según toggles y veredicto, y luego poda los enlaces cuyo origen o destino ya no es visible.
 
 **Interacción:**
-- Click en nodo → abre panel de detalle con propiedades del nodo.
+- Click en nodo → abre panel de detalle (`DetalleNodo`) con propiedades del nodo:
+  - **Referencia**: label, título, autores, año, fuente, DOI, cobertura, score CrossRef.
+  - **Cita**: texto, tipo, página, badge de veredicto, **afirmación del tesista** (`fragmento`) y **contenido original del paper** (`fragmento_evidencia`, con nº de página) como bloques de texto (`BloqueTexto`), motivo (justificación) y métricas (similitud RAG + RAGAS) como chips.
+  - **Documento** / **Autor**: nombre.
 - Etiquetas: siempre visibles en Documento; en otros nodos solo con zoom > 1.5.
 - Altura fija: 580 px. Mide el ancho del contenedor con `ResizeObserver`.
 
@@ -545,7 +562,7 @@ El tema es **oscuro** con variables CSS en `:root`. Las variables de color de ac
 
 5. Tab "Grafo"
    └─ Visualización interactiva ForceGraph2D
-      └─ Toggles Citas/Autores, click en nodo para detalles
+      └─ Toggles Referencias/Citas/Autores + filtro por veredicto, click en nodo para detalles
 
 6. Tab "Motor" (fase 2 completada)
    ├─ Estado del motor (chunks indexados, citas vinculadas)
