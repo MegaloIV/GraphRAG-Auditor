@@ -1,263 +1,113 @@
-import { useState, useCallback } from 'react'
+import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useDropzone } from 'react-dropzone'
-import Navbar from '../components/ui/Navbar'
-import Card from '../components/ui/Card'
+import { FileUp, FileText, ArrowRight } from 'lucide-react'
+import TopBar from '../components/TopBar'
+import { ErrorInline } from '../components/Estados'
 import { ingestaAPI } from '../api/client'
+import { listarRecientes, registrarDocumento } from '../store/documentoStore'
 
-export default function PaginaInicio({ onDocumentoCargado }) {
-  const [estado, setEstado] = useState('idle')
+const MAX_PDF_MB = 10 // debe coincidir con MAX_PDF_SIZE_MB del backend
+
+export default function PaginaInicio() {
+  const navigate = useNavigate()
+  const [subiendo, setSubiendo] = useState(false)
   const [error, setError] = useState(null)
+  const recientes = listarRecientes()
 
-  const onDrop = useCallback(async (archivosAceptados) => {
-    const archivo = archivosAceptados[0]
+  const subir = async (archivos) => {
+    const archivo = archivos[0]
     if (!archivo) return
-
-    setEstado('cargando')
-    setError(null)
-
-    try {
-      const response = await ingestaAPI.cargarPDF(archivo)
-      onDocumentoCargado(response.data.documento_id)
-    } catch (err) {
-      setEstado('error')
-      setError(err)
+    if (archivo.size > MAX_PDF_MB * 1024 * 1024) {
+      setError({
+        mensaje: `El archivo supera el límite de ${MAX_PDF_MB} MB.`,
+        accion: 'Comprime el PDF o divide el documento.',
+      })
+      return
     }
-  }, [onDocumentoCargado])
+    setSubiendo(true)
+    setError(null)
+    try {
+      const { data } = await ingestaAPI.cargarPDF(archivo)
+      registrarDocumento({
+        documentoId: data.documento_id,
+        nombreArchivo: data.nombre_archivo,
+        paginas: data.paginas,
+      })
+      navigate(`/doc/${data.documento_id}/progreso`)
+    } catch (e) {
+      setError(e)
+      setSubiendo(false)
+    }
+  }
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
+    onDrop: subir,
     accept: { 'application/pdf': ['.pdf'] },
     maxFiles: 1,
-    disabled: estado === 'cargando',
+    disabled: subiendo,
   })
 
-  const borderColor = isDragActive
-    ? 'var(--accent)'
-    : estado === 'error'
-    ? 'var(--error)'
-    : 'var(--border)'
-
   return (
-    <div style={{ minHeight: '100vh', background: 'var(--bg-base)' }}>
-      <Navbar />
-
-      <div style={{
-        maxWidth: '680px',
-        margin: '0 auto',
-        padding: '3rem 1.5rem',
-      }}>
-
-        {/* Hero */}
-        <div style={{
-          textAlign: 'center',
-          marginBottom: '2.5rem',
-          animation: 'fadeIn 0.4s ease forwards',
-        }}>
-          <div style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: '0.5rem',
-            padding: '0.4rem 1rem',
-            background: 'var(--accent-subtle)',
-            border: '1px solid rgba(59,130,246,0.2)',
-            borderRadius: '999px',
-            fontSize: '0.78rem',
-            color: 'var(--accent)',
-            fontWeight: 600,
-            marginBottom: '1.25rem',
-            letterSpacing: '0.03em',
-          }}>
-            ⬡ GraphRAG Auditor · APA 7ma edición
-          </div>
-
-          <h1 style={{
-            fontSize: '2.2rem',
-            fontWeight: 700,
-            color: 'var(--text-primary)',
-            lineHeight: 1.2,
-            marginBottom: '0.75rem',
-          }}>
-            Auditoría semántica
-            <br />
-            <span style={{ color: 'var(--accent)' }}>de referencias</span>
-          </h1>
-
-          <p style={{
-            fontSize: '1rem',
-            color: 'var(--text-secondary)',
-            maxWidth: '480px',
-            margin: '0 auto',
-            lineHeight: 1.6,
-          }}>
-            Sube tu tesis y el sistema verificará automáticamente
-            que cada cita sea fiel al documento original.
+    <div>
+      <TopBar />
+      <main style={{ maxWidth: 760, margin: '0 auto', padding: '48px 20px', display: 'flex', flexDirection: 'column', gap: 28 }}>
+        <header style={{ textAlign: 'center', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <h1 style={{ fontSize: 30 }}>Audita las citas de tu tesis</h1>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 16 }}>
+            Sube el PDF y GraphAuditor verificará que cada cita sea fiel a su fuente,
+            paso a paso y con tu revisión en el medio.
           </p>
-        </div>
+        </header>
 
-        {/* Zona de carga */}
-        <Card>
-          <div
-            {...getRootProps()}
-            style={{
-              border: `2px dashed ${borderColor}`,
-              borderRadius: 'var(--radius-lg)',
-              background: isDragActive ? 'var(--accent-subtle)' : 'var(--bg-surface-2)',
-              padding: '3rem 2rem',
-              textAlign: 'center',
-              cursor: estado === 'cargando' ? 'not-allowed' : 'pointer',
-              transition: 'all 0.2s ease',
-              outline: 'none',
-            }}
-          >
-            <input {...getInputProps()} />
-
-            <div style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>
-              {estado === 'cargando' ? '⏳' : isDragActive ? '📂' : '📄'}
+        <div {...getRootProps()} className={`dropzone ${isDragActive ? 'activa' : ''}`}>
+          <input {...getInputProps()} />
+          {subiendo ? (
+            <div className="estado-centro" style={{ padding: 0 }}>
+              <div className="spinner" />
+              <p>Subiendo documento…</p>
             </div>
-
-            <div style={{
-              fontSize: '1rem',
-              fontWeight: 600,
-              color: 'var(--text-primary)',
-              marginBottom: '0.5rem',
-            }}>
-              {estado === 'cargando'
-                ? 'Procesando y analizando documento...'
-                : isDragActive
-                ? 'Suelta el archivo aquí'
-                : 'Arrastra tu tesis aquí'}
-            </div>
-
-            {estado !== 'cargando' && (
-              <div style={{
-                fontSize: '0.85rem',
-                color: 'var(--text-muted)',
-                marginBottom: '1.5rem',
-              }}>
-                o haz click para seleccionar un archivo
-              </div>
-            )}
-
-            {estado === 'cargando' && (
-              <div style={{
-                width: '32px',
-                height: '32px',
-                border: '3px solid var(--border)',
-                borderTop: '3px solid var(--accent)',
-                borderRadius: '50%',
-                margin: '1rem auto',
-                animation: 'spin 1s linear infinite',
-              }} />
-            )}
-
-            {estado !== 'cargando' && (
-              <div style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                padding: '0.4rem 1rem',
-                background: 'var(--bg-surface)',
-                borderRadius: '999px',
-                fontSize: '0.75rem',
-                color: 'var(--text-muted)',
-              }}>
-                <span>PDF</span>
-                <span style={{ color: 'var(--border)' }}>·</span>
-                <span>Máximo 10 MB</span>
-                <span style={{ color: 'var(--border)' }}>·</span>
-                <span>APA 7ma edición</span>
-              </div>
-            )}
-          </div>
-
-          {/* Error */}
-          {estado === 'error' && error && (
-            <div style={{
-              marginTop: '1rem',
-              padding: '1rem',
-              background: 'var(--error-subtle)',
-              border: '1px solid rgba(239, 68, 68, 0.2)',
-              borderRadius: 'var(--radius-md)',
-              animation: 'fadeIn 0.3s ease forwards',
-            }}>
-              <div style={{
-                fontSize: '0.85rem',
-                fontWeight: 600,
-                color: 'var(--error)',
-                marginBottom: '0.25rem',
-              }}>
-                {error.mensaje || 'Error al cargar el archivo'}
-              </div>
-              {error.accion && (
-                <div style={{
-                  fontSize: '0.8rem',
-                  color: 'var(--text-secondary)',
-                }}>
-                  {error.accion}
-                </div>
-              )}
-              <button
-                onClick={() => { setEstado('idle'); setError(null) }}
-                style={{
-                  marginTop: '0.75rem',
-                  padding: '0.4rem 1rem',
-                  background: 'var(--error)',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: 'var(--radius-sm)',
-                  fontSize: '0.8rem',
-                  cursor: 'pointer',
-                  fontFamily: 'var(--font-sans)',
-                }}
-              >
-                Intentar de nuevo
-              </button>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+              <FileUp size={38} color="var(--accent)" strokeWidth={1.5} />
+              <strong style={{ fontSize: 16 }}>
+                {isDragActive ? 'Suelta el PDF aquí' : 'Arrastra tu tesis en PDF o haz clic para elegirla'}
+              </strong>
+              <span style={{ fontSize: 13, color: 'var(--text-faint)' }}>
+                Un documento a la vez · máximo {MAX_PDF_MB} MB
+              </span>
             </div>
           )}
-        </Card>
-
-        {/* Info */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(3, 1fr)',
-          gap: '0.75rem',
-          marginTop: '1.5rem',
-          animation: 'fadeIn 0.5s ease 0.2s forwards',
-          opacity: 0,
-        }}>
-          {[
-            { icono: '🔗', label: 'CrossRef', desc: 'Verifica existencia' },
-            { icono: '🧠', label: 'GraphRAG', desc: 'Análisis semántico' },
-            { icono: '⬡', label: 'Neo4j', desc: 'Grafo de conocimiento' },
-          ].map((item, i) => (
-            <div key={i} style={{
-              padding: '1rem',
-              background: 'var(--bg-surface)',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-md)',
-              textAlign: 'center',
-            }}>
-              <div style={{ fontSize: '1.5rem', marginBottom: '0.4rem' }}>
-                {item.icono}
-              </div>
-              <div style={{
-                fontSize: '0.8rem',
-                fontWeight: 600,
-                color: 'var(--text-primary)',
-              }}>
-                {item.label}
-              </div>
-              <div style={{
-                fontSize: '0.72rem',
-                color: 'var(--text-muted)',
-                marginTop: '2px',
-              }}>
-                {item.desc}
-              </div>
-            </div>
-          ))}
         </div>
-      </div>
+
+        <ErrorInline error={error} />
+
+        {recientes.length > 0 && (
+          <section style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <h2 style={{ fontSize: 16, color: 'var(--text-secondary)' }}>Documentos recientes</h2>
+            {recientes.map((d) => (
+              <button
+                key={d.documentoId}
+                className="tarjeta tarjeta-pad"
+                style={{ display: 'flex', alignItems: 'center', gap: 14, cursor: 'pointer', textAlign: 'left', width: '100%' }}
+                onClick={() => navigate(`/doc/${d.documentoId}/progreso`)}
+              >
+                <FileText size={20} color="var(--accent)" />
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <strong style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {d.nombreArchivo}
+                  </strong>
+                  <span style={{ fontSize: 12.5, color: 'var(--text-faint)' }}>
+                    {d.paginas ? `${d.paginas} páginas · ` : ''}
+                    {new Date(d.cargadoEn).toLocaleDateString()}
+                  </span>
+                </span>
+                <ArrowRight size={17} color="var(--text-faint)" />
+              </button>
+            ))}
+          </section>
+        )}
+      </main>
     </div>
   )
 }

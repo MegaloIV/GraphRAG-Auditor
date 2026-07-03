@@ -5,7 +5,7 @@ from pathlib import Path
 import structlog
 import asyncio
 from fastapi import APIRouter, File, UploadFile, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse, FileResponse
 
 from app.core.config import get_settings
 from app.models.ingesta import (
@@ -26,6 +26,10 @@ router = APIRouter(prefix="/ingesta", tags=["Ingesta"])
 
 def _objeto_pdf(documento_id: str) -> str:
     return f"uploads/{documento_id}.pdf"
+
+
+def _objeto_markdown(documento_id: str) -> str:
+    return f"processed/{documento_id}.md"
 
 
 def _guardar_progreso(progreso: ProgresoAuditoriaResponse) -> None:
@@ -159,6 +163,86 @@ async def iniciar_verificacion(documento_id: str, solicitud: VerificacionSolicit
 
 
 @router.get(
+    "/{documento_id}/markdown",
+    summary="Texto Markdown del documento procesado (para la fase de revisión)",
+)
+async def ver_markdown(documento_id: str):
+    """
+    Devuelve el Markdown extraído del PDF en texto plano. Se usa en el visor
+    de la fase de revisión humana para resaltar las citas detectadas.
+    """
+    texto_md = storage_service.leer_texto(_objeto_markdown(documento_id))
+    if texto_md is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "codigo": "MARKDOWN_NO_ENCONTRADO",
+                "mensaje": "No se encontró el texto procesado del documento.",
+                "accion_sugerida": "Vuelve a cargar el archivo PDF.",
+            },
+        )
+    return PlainTextResponse(content=texto_md, media_type="text/plain; charset=utf-8")
+
+
+@router.get(
+    "/{documento_id}/pdf",
+    summary="PDF original del documento (para el visor de la fase de revisión)",
+)
+async def ver_pdf(documento_id: str):
+    """
+    Sirve el PDF tal cual fue subido. El visor de la revisión humana lo
+    renderiza y superpone los resaltados de GET /grafo/{id}/citas/ubicaciones.
+    """
+    ruta_pdf = storage_service.obtener_local(_objeto_pdf(documento_id))
+    if ruta_pdf is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "codigo": "DOCUMENTO_NO_ENCONTRADO",
+                "mensaje": "No se encontró el PDF del documento.",
+                "accion_sugerida": "Vuelve a cargar el archivo PDF.",
+            },
+        )
+    return FileResponse(
+        ruta_pdf,
+        media_type="application/pdf",
+        filename=f"{documento_id}.pdf",
+        content_disposition_type="inline",
+    )
+
+
+@router.post(
+    "/{documento_id}/confirmar-revision",
+    summary="Confirmar la revisión humana de citas y referencias",
+)
+async def confirmar_revision(documento_id: str):
+    """
+    Cierra la fase de revisión: pasa de REVISION_PENDIENTE a LISTO_EXTRACCION,
+    desbloqueando el flujo de verificación externa.
+    """
+    progreso = _leer_progreso(documento_id)
+    if not progreso or progreso.estado != EstadoIngesta.REVISION_PENDIENTE:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "codigo": "ESTADO_INVALIDO",
+                "mensaje": "El documento no está en fase de revisión.",
+                "accion_sugerida": "Espera a que la extracción termine antes de confirmar.",
+            },
+        )
+
+    _guardar_progreso(ProgresoAuditoriaResponse(
+        documento_id=documento_id,
+        estado=EstadoIngesta.LISTO_EXTRACCION,
+        porcentaje=100,
+        mensaje_progreso="Revisión confirmada. Selecciona las referencias a verificar.",
+        citas_encontradas=progreso.citas_encontradas,
+    ))
+    logger.info("revision_confirmada", doc_id=documento_id)
+    return {"documento_id": documento_id, "estado": EstadoIngesta.LISTO_EXTRACCION.value}
+
+
+@router.get(
     "/{documento_id}/estructura",
     response_model=EstructuraDocumentoResponse,
     summary="HU-002: Ver estructura detectada del documento",
@@ -230,6 +314,7 @@ async def ver_progreso(documento_id: str):
                 EstadoIngesta.COMPLETADO,
                 EstadoIngesta.ERROR,
                 EstadoIngesta.LISTO_EXTRACCION,
+                EstadoIngesta.REVISION_PENDIENTE,
             )
             if progreso.estado in estados_terminales:
                 logger.info("sse_finalizado", doc_id=documento_id, estado=progreso.estado)
@@ -273,6 +358,10 @@ def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
         actualizar(10, "Extrayendo texto del PDF...")
         texto_md, num_paginas = pdf_service.extraer_texto(ruta_pdf)
 
+        # Persistir el Markdown para que la fase de revisión humana pueda
+        # mostrarlo en el visor del frontend (GET /ingesta/{id}/markdown).
+        storage_service.subir_texto(_objeto_markdown(documento_id), texto_md)
+
         actualizar(25, "Analizando estructura del documento...")
         pdf_service.detectar_secciones(texto_md, num_paginas, documento_id)
 
@@ -293,9 +382,9 @@ def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
 
         _guardar_progreso(ProgresoAuditoriaResponse(
             documento_id=documento_id,
-            estado=EstadoIngesta.LISTO_EXTRACCION,
+            estado=EstadoIngesta.REVISION_PENDIENTE,
             porcentaje=100,
-            mensaje_progreso="Extracción completada. Selecciona las citas a verificar.",
+            mensaje_progreso="Extracción completada. Revisa y confirma las citas y referencias antes de continuar.",
             citas_encontradas=len(citas),
         ))
         _log.info(f"[pipeline] extraccion_completada doc_id={documento_id} citas={len(citas)}")

@@ -30,7 +30,7 @@ PDF → [Ingesta] → [Extracción LLM] → [Grafo Neo4j] → [Verificación Ext
                                                              ↓
                                               [Motor de Recuperación Híbrida]
                                                              ↓
-                                              [Auditoría Semántica GPT-4o-mini]
+                                              [Auditoría Semántica gpt-5.4-mini]
                                                              ↓
                                                     Veredictos + RAGAS
 ```
@@ -41,7 +41,7 @@ PDF → [Ingesta] → [Extracción LLM] → [Grafo Neo4j] → [Verificación Ext
 |---|---|
 | **Neo4j AuraDB** | Grafo de conocimiento (Documentos, Referencias, Citas, Autores) |
 | **Supabase pgvector** | Vector store para chunks de papers (embeddings 1536D) |
-| **OpenAI GPT-4o-mini** | Extracción de entidades y emisión de veredictos |
+| **OpenAI gpt-5.4-mini** | Extracción de entidades y emisión de veredictos |
 | **Groq Llama 3.3 70B** | LLM alternativo (configurable) |
 | **CrossRef API** | Verificación de existencia de referencias académicas |
 | **Unpaywall API** | Obtención de PDFs open access |
@@ -103,7 +103,7 @@ Se carga desde `.env` con `pydantic-settings`. La instancia es un singleton cach
 | `GROQ_API_KEY` | str | `""` | API key de Groq |
 | `GROQ_MODEL` | str | `llama-3.3-70b-versatile` | Modelo Groq |
 | `OPENAI_API_KEY` | str | `""` | API key de OpenAI |
-| `OPENAI_MODEL` | str | `gpt-4o-mini` | Modelo OpenAI (extracción y auditoría) |
+| `OPENAI_MODEL` | str | `gpt-5.4-mini` | Modelo OpenAI (extracción y auditoría) |
 | `OPENAI_EMBEDDING_MODEL` | str | `text-embedding-3-small` | Modelo de embeddings (1536D) |
 | `CROSSREF_EMAIL` | str | — | Email para CrossRef API (obligatorio) |
 | `NEO4J_URI` | str | `""` | URI de Neo4j AuraDB |
@@ -457,7 +457,7 @@ Búsqueda vectorial global (sin filtro de DOI) cruzada con las citas del documen
 
 ### `services/auditoria/auditoria_service.py`
 
-Auditoría semántica con GPT-4o-mini.
+Auditoría semántica con gpt-5.4-mini.
 
 **`auditar_documento(doc_id) → list[VeredictoAuditoria]`**
 
@@ -491,7 +491,7 @@ Evaluación con framework RAGAS (sin ground truth externo).
 
 > ⚠️ No se usa `context_precision` (con referencia): en RAGAS 0.1.x requiere la columna `ground_truth`, que este sistema no posee, y provocaba que `evaluate()` fallara y devolviera métricas nulas. `context_recall` y `answer_correctness` se excluyen por el mismo motivo.
 
-LLM: `gpt-4o-mini` vía `langchain_openai`. Embeddings: `text-embedding-3-small`.
+LLM: `gpt-5.4-mini` vía `langchain_openai`. Embeddings: `text-embedding-3-small`.
 
 ---
 

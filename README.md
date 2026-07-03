@@ -15,7 +15,7 @@ GraphRAG-Auditor automatiza el proceso de auditoría académica en un pipeline d
 3. Construye un **grafo de conocimiento** en Neo4j que modela las relaciones entre documentos, citas, referencias y autores.
 4. Verifica la existencia y metadatos de cada referencia contra la API pública de **CrossRef**.
 5. Recupera fragmentos relevantes de los papers citados desde el almacén vectorial (**Supabase + pgvector**) mediante embeddings semánticos.
-6. Un LLM (**GPT-4o-mini**) emite un veredicto por cada cita: `VÁLIDA`, `DUDOSA`, `ALUCINADA` o `NO_VERIFICABLE`.
+6. Un LLM (**gpt-5.4-mini**) emite un veredicto por cada cita: `VÁLIDA`, `DUDOSA`, `ALUCINADA` o `NO_VERIFICABLE`.
 7. Evalúa la calidad de la recuperación con las métricas del framework **RAGAS** (faithfulness, answer relevancy, context precision, context recall, answer correctness).
 8. Presenta los resultados en una interfaz web interactiva y permite exportarlos a Excel.
 
@@ -32,7 +32,7 @@ GraphRAG-Auditor automatiza el proceso de auditoría académica en un pipeline d
 | Base de datos de grafos | Neo4j 6.2 |
 | Almacén vectorial | Supabase PostgreSQL + pgvector 0.4 + psycopg2 |
 | Extracción de PDF | PyMuPDF 1.24 + pymupdf4llm + pdfplumber |
-| LLM principal | OpenAI GPT-4o-mini (openai 1.109) |
+| LLM principal | OpenAI gpt-5.4-mini (openai 1.109) |
 | LLM alternativo | Groq / LLaMA 3.1 (groq vía LangChain) |
 | Embeddings | sentence-transformers 5.5 + ONNX Runtime |
 | Evaluación RAG | RAGAS 0.1.21 |
@@ -93,7 +93,7 @@ GraphRAG-Auditor/
 │   │   │   ├── recuperacion/
 │   │   │   │   └── recuperacion_service.py # Búsqueda híbrida: grafo + vectores
 │   │   │   ├── auditoria/
-│   │   │   │   └── auditoria_service.py   # Veredictos con GPT-4o-mini + detección inconsistencias
+│   │   │   │   └── auditoria_service.py   # Veredictos con gpt-5.4-mini + detección inconsistencias
 │   │   │   ├── evaluacion/
 │   │   │   │   └── ragas_service.py       # Evaluación con framework RAGAS
 │   │   │   ├── vectorstore/
@@ -104,7 +104,7 @@ GraphRAG-Auditor/
 │   │   │   │   ├── embedding_service.py   # Generación de embeddings (sentence-transformers)
 │   │   │   │   └── verificacion_service.py # Orquestador de verificación externa
 │   │   │   └── llm/
-│   │   │       ├── openai_client.py       # Cliente OpenAI (GPT-4o-mini)
+│   │   │       ├── openai_client.py       # Cliente OpenAI (gpt-5.4-mini)
 │   │   │       └── groq_client.py         # Cliente Groq (LLaMA)
 │   │   ├── utils/
 │   │   └── main.py                   # Punto de entrada FastAPI + lifespan + CORS
@@ -181,7 +181,7 @@ PDF subido
 [25%] Detección de secciones del documento
     │
     ▼
-[40%] Extracción de referencias APA (GPT-4o-mini)
+[40%] Extracción de referencias APA (gpt-5.4-mini)
     │
     ▼
 [55%] Extracción de citas en el texto (regex + LLM)
@@ -200,7 +200,7 @@ PDF subido
 [100%] Pipeline completado — auditoría semántica disponible
     │
     ▼
-(Manual) POST /auditar → GPT-4o-mini emite veredicto por cita
+(Manual) POST /auditar → gpt-5.4-mini emite veredicto por cita
     │
     ▼
 (Manual) POST /evaluar-ragas → scores RAGAS por cita
@@ -216,7 +216,7 @@ PDF subido
 - **Node.js** 18 o superior
 - Cuenta en **Neo4j AuraDB** (o instancia Neo4j local 5.x)
 - Proyecto en **Supabase** con extensión `pgvector` habilitada
-- API key de **OpenAI** (GPT-4o-mini)
+- API key de **OpenAI** (gpt-5.4-mini)
 - API key de **Groq** (opcional, como LLM alternativo)
 
 ### Backend
@@ -319,7 +319,7 @@ npm run dev
 | `APP_ENV` | Entorno de ejecución | `development` |
 | `APP_PORT` | Puerto del servidor | `8000` |
 | `OPENAI_API_KEY` | Clave API de OpenAI | `sk-proj-...` |
-| `OPENAI_MODEL` | Modelo de OpenAI a usar | `gpt-4o-mini` |
+| `OPENAI_MODEL` | Modelo de OpenAI a usar | `gpt-5.4-mini` |
 | `GROQ_API_KEY` | Clave API de Groq (opcional) | `gsk_...` |
 | `GROQ_MODEL` | Modelo de Groq | `llama-3.1-8b-instant` |
 | `NEO4J_URI` | URI de conexión a Neo4j | `neo4j+s://xxxx.databases.neo4j.io` |
@@ -417,7 +417,7 @@ Todas las rutas están bajo el prefijo `/api/v1`. La documentación interactiva 
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| `POST` | `/auditoria/{doc_id}/auditar` | Audita todas las citas con GPT-4o-mini. Emite y persiste veredictos en Neo4j |
+| `POST` | `/auditoria/{doc_id}/auditar` | Audita todas las citas con gpt-5.4-mini. Emite y persiste veredictos en Neo4j |
 | `GET` | `/auditoria/{doc_id}/veredictos` | Devuelve los veredictos ya calculados (`VÁLIDA`, `DUDOSA`, `ALUCINADA`, `NO_VERIFICABLE`) |
 | `GET` | `/auditoria/{doc_id}/alertas` | Inconsistencias estructurales: citas sin referencia y referencias no citadas |
 | `GET` | `/auditoria/{doc_id}/alertas/alucinaciones` | Citas que el sistema no pudo verificar por falta de evidencia |

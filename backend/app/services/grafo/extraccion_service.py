@@ -10,18 +10,23 @@ logger = structlog.get_logger(__name__)
 
 # Compiled from the original inline patron in extraer_referencias.
 # Covers markdown headings, bold, and simple numbered formats.
+# Decimal section numbers (e.g. "3.1 Referencias"), "Lista de referencias",
+# and optional trailing colon are also handled.
 _RE_REFERENCIAS = re.compile(
     r'^(\*{1,2})?\s*#{0,3}\s*'
-    r'(referencias?\s*bibliogr[áa]ficas?|referencias?|bibliograf[íi]a|references?'
+    r'(lista\s+de\s+referencias?\s*(?:bibliogr[áa]ficas?)?'
+    r'|referencias?\s*bibliogr[áa]ficas?|referencias?|bibliograf[íi]a|references?'
+    r'|reference\s+list'
     r'|works?\s+cited|fuentes?\s+bibliogr[áa]ficas?|fuentes?\s+de\s+consulta'
-    r'|\d+[\.\s]+referencias?|\d+[\.\s]+bibliograf[íi]a)'
-    r'\s*(\*{1,2})?\s*$',
+    r'|\d+(?:\.\d+)*\.?\s+referencias?(?:\s+bibliogr[áa]ficas?)?|\d+(?:\.\d+)*\.?\s+bibliograf[íi]a)'
+    r'\s*:?\s*(\*{1,2})?\s*$',
     re.IGNORECASE | re.MULTILINE,
 )
 
 # Numbered heading with optional word suffix: "7.  Referencias bibliográficas"
+# Handles single and decimal section numbers (e.g. "3.1. Referencias").
 _RE_REFERENCIAS_NUMERADA = re.compile(
-    r'^\d+\.?\s+(?:referencias?(?:\s+\w+)?|bibliograf[íi]a(?:\s+\w+)?)\s*$',
+    r'^\d+(?:\.\d+)*\.?\s+(?:referencias?(?:\s+\w+)?|bibliograf[íi]a(?:\s+\w+)?)\s*:?\s*$',
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -32,6 +37,13 @@ _RE_INICIO_ANEXOS = re.compile(
     r'(Anexos?|Ap[eé]ndices?|Appendix)'
     r'\s*(?:\*{1,2})?\s*$',
     re.IGNORECASE | re.MULTILINE,
+)
+
+# Used in the normalization pass of _truncar_antes_de_anexos.
+# Matches after all * and leading numbers are stripped from the line.
+_RE_KEYWORD_ANEXOS = re.compile(
+    r'^\s*(?:\d+\.?\s+)?(Anexos?|Ap[eé]ndices?|Appendix)\s*$',
+    re.IGNORECASE,
 )
 
 # Matches plain-text numbered annex lines: "Anexo 2." or "Anexo 3:"
@@ -118,6 +130,19 @@ Reglas estrictas:
 - Si la idea empieza claramente dentro del bloque principal (empieza con mayúscula y sujeto completo), no uses el CONTEXTO PREVIO en fragmento_oracion."""
 
 
+class _MatchProxy:
+    """Minimal stand-in for re.Match used when detection requires line normalization."""
+    def __init__(self, start: int, text: str):
+        self._start = start
+        self._text = text
+
+    def start(self) -> int:
+        return self._start
+
+    def group(self) -> str:
+        return self._text
+
+
 class EntidadExtractionService:
 
     def extraer_referencias(self, texto: str) -> list[ReferenciaAPA]:
@@ -127,10 +152,12 @@ class EntidadExtractionService:
         texto = self._truncar_antes_de_anexos(texto)
         match = self._encontrar_inicio_referencias(texto)
         if match:
-            texto_referencias = texto[match.start():]
+            texto_desde_refs = texto[match.start():]
+            fin = self._encontrar_fin_seccion(texto_desde_refs)
+            texto_referencias = texto_desde_refs[:fin]
             logger.info("seccion_referencias_encontrada", chars=len(texto_referencias))
         else:
-            texto_referencias = texto[-4000:]
+            texto_referencias = texto[-12000:]
             logger.warning("seccion_referencias_no_encontrada_usando_final_del_documento")
 
         if not texto_referencias.strip():
@@ -261,16 +288,51 @@ class EntidadExtractionService:
     def _encontrar_inicio_referencias(texto: str):
         """
         Returns the first re.Match for the references section heading, or None.
-        Tries the comprehensive pattern (_RE_REFERENCIAS) first; falls back to
-        the numbered-with-suffix pattern (_RE_REFERENCIAS_NUMERADA) to cover
-        plain-text headings like "7.  Referencias bibliográficas".
+
+        Three passes:
+        1. _RE_REFERENCIAS against the original text.
+        2. _RE_REFERENCIAS_NUMERADA against the original text.
+        3. Line-by-line with all bold markers (*) stripped — handles split-bold
+           headings like "**7** **REFERENCIAS BIBLIOGRAFICAS**" produced by
+           pymupdf4llm when each word has its own bold span.
         """
         match = _RE_REFERENCIAS.search(texto)
         if not match:
             match = _RE_REFERENCIAS_NUMERADA.search(texto)
         if match:
             logger.debug("encabezado_referencias_detectado", encabezado=match.group().strip())
-        return match
+            return match
+
+        # Pass 3: strip inline bold markers per line and retry
+        offset = 0
+        for linea in texto.splitlines(keepends=True):
+            linea_norm = re.sub(r'\*+', '', linea).strip()
+            if _RE_REFERENCIAS.match(linea_norm) or _RE_REFERENCIAS_NUMERADA.match(linea_norm):
+                logger.debug(
+                    "encabezado_referencias_detectado_normalizado",
+                    original=linea.strip(),
+                    normalizado=linea_norm,
+                )
+                return _MatchProxy(offset, linea.rstrip('\r\n'))
+            offset += len(linea)
+
+        return None
+
+    @staticmethod
+    def _encontrar_fin_seccion(texto_desde_refs: str) -> int:
+        """
+        Returns the position where the references section ends.
+        Looks for the next # heading after the first line (the heading itself).
+        If no next heading is found, the section extends to the end of the text.
+        """
+        # Skip the heading line itself before searching for the next heading
+        primera_linea_len = texto_desde_refs.index('\n') + 1 if '\n' in texto_desde_refs else len(texto_desde_refs)
+        _RE_SIGUIENTE_SECCION = re.compile(r'^#{1,3}\s+\S', re.MULTILINE)
+        m = _RE_SIGUIENTE_SECCION.search(texto_desde_refs, primera_linea_len)
+        if m:
+            logger.info("fin_seccion_referencias_detectado", posicion=m.start(), encabezado=m.group().strip())
+            return m.start()
+        return len(texto_desde_refs)
 
     @staticmethod
     def _truncar_antes_de_anexos(texto: str) -> str:
@@ -285,10 +347,25 @@ class EntidadExtractionService:
         """
         posicion = len(texto)
 
+        # Pass 1: markdown / plain bold heading
         m_heading = _RE_INICIO_ANEXOS.search(texto)
         if m_heading:
             posicion = m_heading.start()
 
+        # Pass 2: split-bold headings like "**8** **ANEXOS**" — strip all * and leading
+        # numbers from each line, then check against the keyword pattern.
+        offset = 0
+        for linea in texto.splitlines(keepends=True):
+            if offset >= posicion:
+                break
+            linea_norm = re.sub(r'\*+', ' ', linea).strip()
+            linea_norm = re.sub(r'\s{2,}', ' ', linea_norm)
+            if _RE_KEYWORD_ANEXOS.match(linea_norm):
+                posicion = min(posicion, offset)
+                break
+            offset += len(linea)
+
+        # Pass 3: plain-text "Anexo N." line, only after 70% to avoid false positives
         limite_70 = int(len(texto) * 0.70)
         for m_num in _RE_ANEXO_NUMERADO.finditer(texto):
             if m_num.start() >= limite_70:

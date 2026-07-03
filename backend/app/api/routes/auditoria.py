@@ -41,8 +41,8 @@ router = APIRouter(prefix="/auditoria", tags=["Auditoría"])
 async def auditar_documento(documento_id: str):
     """
     Ejecuta la auditoría semántica completa:
-    por cada cita recupera evidencia del grafo + ChromaDB
-    y emite un veredicto con GPT-4o-mini.
+    por cada cita recupera evidencia del grafo + Supabase/pgvector
+    y emite un veredicto con gpt-5.4-mini.
     Persiste los veredictos en Neo4j.
     """
     try:
@@ -244,7 +244,7 @@ async def ver_alertas(documento_id: str):
 async def ver_alertas_alucinaciones(documento_id: str):
     """
     Lista las citas con veredicto NO_VERIFICABLE — aquellas para las que
-    el sistema no encontró evidencia en el grafo ni en ChromaDB.
+    el sistema no encontró evidencia en el grafo ni en Supabase/pgvector.
     El revisor no debe confiar ciegamente en estos casos.
     """
     query = """

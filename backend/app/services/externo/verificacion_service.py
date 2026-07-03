@@ -1,11 +1,11 @@
 """
 Servicio orquestador de verificación externa de referencias.
-Une CrossRef + Unpaywall + ChromaDB + Neo4j.
+Une CrossRef + Unpaywall + Supabase/pgvector + Neo4j.
 
 Flujo por referencia:
 1. CrossRef  → ¿existe? + abstract
 2. Unpaywall → ¿hay PDF gratuito? → texto completo
-3. ChromaDB  → generar y guardar embedding
+3. Supabase/pgvector  → generar y guardar embedding
 4. Neo4j     → actualizar nodo Referencia con resultados
 """
 import structlog
