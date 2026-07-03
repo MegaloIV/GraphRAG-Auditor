@@ -1,14 +1,32 @@
+# Entornos virtuales
+.venv/
+venv/
+node_modules/
+
+# Secretos y configuración local
 .env
 .env.*
 .env.local
+Keys/
+
+# Artefactos de build/runtime
 __pycache__/
 *.pyc
 *.pyo
-.pytest_cache/
+dist/
+*.log
+logs/
+
+# Tests (no necesarios en producción)
 tests/
 test_*.py
+.pytest_cache/
+
+# SQL y datos locales
+sql/
+data/
+
+# Git y docs
 .git/
 .gitignore
-.venv/
-venv/
 *.md
