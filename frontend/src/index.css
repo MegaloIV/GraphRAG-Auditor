@@ -283,6 +283,18 @@ textarea.campo { resize: vertical; min-height: 64px; font-family: var(--font-doc
 .overlay-resaltado.parpadeo { animation: parpadeo 0.55s ease-in-out 3; }
 @keyframes parpadeo { 50% { opacity: 0.65; } }
 
+/* Zona clicable sobre cada cita localizada en el PDF: subrayado sutil
+   permanente para indicar que es interactiva; al pasar el mouse se sombrea. */
+.hotspot-cita {
+  position: absolute;
+  cursor: pointer;
+  border-bottom: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: 2px;
+  transition: background 0.12s;
+}
+.hotspot-cita:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.hotspot-cita.activa { border-bottom-color: var(--accent); }
+
 /* ── Cartillas ── */
 .cartilla {
   background: var(--bg-surface);

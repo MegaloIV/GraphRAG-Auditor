@@ -46,6 +46,13 @@ export const ingestaAPI = {
   urlPDF: (documentoId) => `${API_BASE}/ingesta/${documentoId}/pdf`,
   iniciarVerificacion: (documentoId, referenciaIds) =>
     client.post(`/ingesta/${documentoId}/verificar`, { referencia_ids: referenciaIds }),
+  importarZotero: (documentoId, archivo) => {
+    const form = new FormData()
+    form.append('archivo', archivo)
+    return client.post(`/ingesta/${documentoId}/importar-zotero`, form, { timeout: 120000 })
+  },
+  resultadoZotero: (documentoId) =>
+    client.get(`/ingesta/${documentoId}/importar-zotero/resultado`),
   confirmarRevision: (documentoId) =>
     client.post(`/ingesta/${documentoId}/confirmar-revision`),
   // El endpoint SSE emite el estado actual y cierra si es terminal:
@@ -90,6 +97,8 @@ export const grafoAPI = {
       timeout: 120000,
     })
   },
+  quitarPaper: (documentoId, referenciaId) =>
+    client.delete(`/grafo/${documentoId}/referencias/${referenciaId}/paper`),
 
   // CRUD de revisión humana — citas
   actualizarCita: (documentoId, citaId, data) =>
@@ -138,8 +147,12 @@ export const auditoriaAPI = {
   evaluarRagas: (documentoId) =>
     client.post(`/auditoria/${documentoId}/evaluar-ragas`, null, { timeout: AUDITORIA_TIMEOUT }),
   verMetricas: (documentoId) => client.get(`/auditoria/${documentoId}/metricas`),
-  exportarInformeExcel: (documentoId) =>
-    client.get(`/auditoria/${documentoId}/metricas/exportar`, { responseType: 'blob' }),
+  // El informe del usuario va SIN métricas RAGAS; el admin exporta con ellas.
+  exportarInformeExcel: (documentoId, incluirRagas = false) =>
+    client.get(`/auditoria/${documentoId}/metricas/exportar`, {
+      responseType: 'blob',
+      params: incluirRagas ? { incluir_ragas: true } : undefined,
+    }),
 }
 
 // ── Evaluación vs ground truth experto (admin, separado de RAGAS) ──

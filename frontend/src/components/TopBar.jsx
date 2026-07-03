@@ -51,9 +51,9 @@ export default function TopBar({ nombreDocumento }) {
 
       <div style={{ flex: 1 }} />
 
-      <span className="salud">
+      <span className="salud" title="Estado de la conexión con el servidor">
         <span className={`salud-punto ${salud === 'verificando' ? '' : salud}`} />
-        {salud === 'ok' ? 'backend ok' : salud === 'mal' ? 'backend sin conexión' : 'verificando…'}
+        {salud === 'ok' ? 'En línea' : salud === 'mal' ? 'Sin conexión' : 'Conectando…'}
       </span>
 
       <SelectorAccent />

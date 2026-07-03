@@ -47,8 +47,8 @@ export default function PaginaRagas() {
 
   const exportar = async () => {
     try {
-      const { data } = await auditoriaAPI.exportarInformeExcel(documentoId)
-      descargarBlob(data, `informe_auditoria_${documentoId}.xlsx`)
+      const { data } = await auditoriaAPI.exportarInformeExcel(documentoId, true)
+      descargarBlob(data, `informe_auditoria_ragas_${documentoId}.xlsx`)
     } catch (e) {
       setError(e)
     }

@@ -15,6 +15,14 @@ const COLORES_TIPO = {
   Autor: '#8b5cf6',
 }
 
+// Filtros por veredicto (mismo código de color que el resto de la app).
+const FILTROS_VEREDICTO = [
+  { clave: 'SUPPORTS', texto: 'Respaldadas', color: '#15803d' },
+  { clave: 'REFUTES', texto: 'Refutadas', color: '#b91c1c' },
+  { clave: 'NO_INFO', texto: 'Sin evidencia', color: '#52525b' },
+  { clave: 'SIN_AUDITAR', texto: 'Sin auditar', color: '#10b981' },
+]
+
 function DetalleNodo({ nodo, onCerrar }) {
   if (!nodo) return null
   return (
@@ -60,6 +68,8 @@ export default function PaginaGrafo() {
   const [nodoActivo, setNodoActivo] = useState(null)
   const contRef = useRef(null)
   const [ancho, setAncho] = useState(800)
+  // Filtros de veredicto: las citas fuera del filtro se ocultan del grafo.
+  const [filtros, setFiltros] = useState(new Set(['SUPPORTS', 'REFUTES', 'NO_INFO', 'SIN_AUDITAR']))
 
   const cargar = useCallback(async () => {
     setError(null)
@@ -84,13 +94,41 @@ export default function PaginaGrafo() {
     return () => window.removeEventListener('resize', medir)
   }, [datos])
 
+  const conteos = useMemo(() => {
+    const c = { SUPPORTS: 0, REFUTES: 0, NO_INFO: 0, SIN_AUDITAR: 0 }
+    for (const n of datos?.nodes || []) {
+      if (n.tipo === 'Cita') c[n.veredicto || 'SIN_AUDITAR'] += 1
+    }
+    return c
+  }, [datos])
+
   const grafo = useMemo(() => {
     if (!datos) return null
-    return {
-      nodes: datos.nodes.map((n) => ({ ...n })),
-      links: datos.links.map((l) => ({ ...l })),
-    }
-  }, [datos])
+    const visibles = new Set()
+    const nodes = datos.nodes
+      .filter((n) => {
+        if (n.tipo !== 'Cita') return true
+        return filtros.has(n.veredicto || 'SIN_AUDITAR')
+      })
+      .map((n) => {
+        visibles.add(n.id)
+        return { ...n }
+      })
+    const links = datos.links
+      .filter((l) => visibles.has(l.source) && visibles.has(l.target))
+      .map((l) => ({ ...l }))
+    return { nodes, links }
+  }, [datos, filtros])
+
+  const alternarFiltro = (clave) => {
+    setFiltros((prev) => {
+      const s = new Set(prev)
+      if (s.has(clave)) s.delete(clave)
+      else s.add(clave)
+      return s
+    })
+    setNodoActivo(null)
+  }
 
   if (error) return <EstadoError error={error} onReintentar={cargar} />
   if (!grafo) return <EstadoCarga mensaje="Cargando grafo…" />
@@ -118,19 +156,55 @@ export default function PaginaGrafo() {
         </div>
       )}
 
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+        <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Mostrar citas:</span>
+        {FILTROS_VEREDICTO.map(({ clave, texto, color }) => {
+          const activa = filtros.has(clave)
+          return (
+            <button
+              key={clave}
+              onClick={() => alternarFiltro(clave)}
+              className="badge"
+              style={{
+                cursor: 'pointer',
+                border: `1.5px solid ${activa ? color : 'var(--border)'}`,
+                background: activa ? undefined : 'transparent',
+                backgroundColor: activa ? `color-mix(in srgb, ${color} 14%, transparent)` : 'transparent',
+                color: activa ? color : 'var(--text-faint)',
+                opacity: activa ? 1 : 0.7,
+              }}
+              title={activa ? 'Clic para ocultar' : 'Clic para mostrar'}
+            >
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: activa ? color : 'var(--text-faint)' }} />
+              {texto} ({conteos[clave]})
+            </button>
+          )
+        })}
+      </div>
+
       <div ref={contRef} className="tarjeta" style={{ position: 'relative', height: 560, overflow: 'hidden' }}>
         <ForceGraph2D
           graphData={grafo}
           width={ancho}
           height={560}
-          nodeLabel={(n) => n.label}
+          nodeLabel={(n) =>
+            n.tipo === 'Cita' && n.similitud != null
+              ? `${n.label} · similitud ${pct(n.similitud)}`
+              : n.label
+          }
           nodeColor={(n) => {
             if (n.tipo === 'Cita' && n.veredicto) {
               return n.veredicto === 'SUPPORTS' ? '#15803d' : n.veredicto === 'REFUTES' ? '#b91c1c' : '#52525b'
             }
             return COLORES_TIPO[n.tipo] || '#94a3b8'
           }}
-          nodeVal={(n) => (n.tipo === 'Documento' ? 9 : n.tipo === 'Referencia' ? 5 : 3)}
+          nodeVal={(n) => {
+            if (n.tipo === 'Documento') return 9
+            if (n.tipo === 'Referencia') return 5
+            // Citas: el tamaño refleja la similitud con la evidencia (0-100%).
+            if (n.tipo === 'Cita') return 2 + (n.similitud || 0) * 12
+            return 2.5 // Autor
+          }}
           linkColor={() => 'rgba(128,140,155,0.35)'}
           onNodeClick={setNodoActivo}
           cooldownTicks={90}
@@ -143,6 +217,11 @@ export default function PaginaGrafo() {
               {tipo}
             </span>
           ))}
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--text-faint)' }} />
+            <span style={{ width: 11, height: 11, borderRadius: '50%', background: 'var(--text-faint)' }} />
+            tamaño de cita = % de similitud
+          </span>
         </div>
       </div>
     </div>

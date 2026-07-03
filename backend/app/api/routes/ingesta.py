@@ -162,6 +162,80 @@ async def iniciar_verificacion(documento_id: str, solicitud: VerificacionSolicit
     return {"mensaje": "Verificación iniciada.", "documento_id": documento_id}
 
 
+@router.post(
+    "/{documento_id}/importar-zotero",
+    summary="Importar colección de Zotero (.ris o .zip con PDFs) y asociar papers",
+)
+async def importar_zotero(documento_id: str, archivo: UploadFile = File(...)):
+    """
+    Empareja las entradas del RIS con las referencias del documento (DOI exacto,
+    o título+autor+año), sobrescribe metadatos con los de Zotero y asocia los
+    PDFs (adjuntos del ZIP o descarga open access por DOI). Corre en segundo
+    plano; el avance se sigue por el SSE de progreso y el resumen queda en
+    GET /{id}/importar-zotero/resultado.
+    """
+    progreso = _leer_progreso(documento_id)
+    estados_validos = {EstadoIngesta.LISTO_EXTRACCION, EstadoIngesta.COMPLETADO}
+    if not progreso or progreso.estado not in estados_validos:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "codigo": "ESTADO_INVALIDO",
+                "mensaje": "El documento no está listo para importar la colección.",
+                "accion_sugerida": "Confirma la revisión antes de importar desde Zotero.",
+            },
+        )
+
+    nombre = archivo.filename or ""
+    if not nombre.lower().endswith((".ris", ".zip")):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "codigo": "FORMATO_INVALIDO",
+                "mensaje": "El archivo debe ser un .ris de Zotero o un .zip exportado con archivos.",
+                "accion_sugerida": "En Zotero: clic derecho en la colección → Exportar (formato RIS).",
+            },
+        )
+
+    contenido = await archivo.read()
+
+    _guardar_progreso(ProgresoAuditoriaResponse(
+        documento_id=documento_id,
+        estado=EstadoIngesta.VERIFICANDO,
+        porcentaje=0,
+        mensaje_progreso="Importando colección de Zotero...",
+    ))
+
+    hilo = threading.Thread(
+        target=_ejecutar_importacion_zotero,
+        args=(documento_id, contenido, nombre, progreso.estado),
+        daemon=True,
+    )
+    hilo.start()
+
+    return {"mensaje": "Importación iniciada.", "documento_id": documento_id}
+
+
+@router.get(
+    "/{documento_id}/importar-zotero/resultado",
+    summary="Resumen de la última importación de Zotero",
+)
+async def resultado_zotero(documento_id: str):
+    from app.services.externo.zotero_service import zotero_service
+
+    resumen = zotero_service.leer_resultado(documento_id)
+    if resumen is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "codigo": "IMPORTACION_NO_ENCONTRADA",
+                "mensaje": "No hay una importación de Zotero para este documento.",
+                "accion_sugerida": "Importa primero un archivo .ris o .zip.",
+            },
+        )
+    return resumen
+
+
 @router.get(
     "/{documento_id}/markdown",
     summary="Texto Markdown del documento procesado (para la fase de revisión)",
@@ -409,6 +483,51 @@ def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
             porcentaje=0,
             mensaje_progreso="La extracción falló.",
             error="Ocurrió un error durante el procesamiento. Intenta nuevamente.",
+        ))
+
+
+# ── Importación de colección Zotero (segundo plano) ─────────────────────────
+
+def _ejecutar_importacion_zotero(
+    documento_id: str, contenido: bytes, nombre: str, estado_previo: EstadoIngesta
+) -> None:
+    import logging
+    from app.services.externo.zotero_service import zotero_service
+
+    _log = logging.getLogger(__name__)
+
+    def notificar(porcentaje: int, mensaje: str) -> None:
+        _log.info(f"[zotero] {porcentaje}% — {mensaje}")
+        _guardar_progreso(ProgresoAuditoriaResponse(
+            documento_id=documento_id,
+            estado=EstadoIngesta.VERIFICANDO,
+            porcentaje=porcentaje,
+            mensaje_progreso=mensaje,
+        ))
+
+    try:
+        resumen = zotero_service.importar(documento_id, contenido, nombre, notificar)
+        emparejadas = resumen["emparejadas_por_doi"] + resumen["emparejadas_por_titulo"]
+        con_pdf = resumen["con_pdf_zotero"] + resumen["descargadas_unpaywall"]
+        _guardar_progreso(ProgresoAuditoriaResponse(
+            documento_id=documento_id,
+            estado=EstadoIngesta.COMPLETADO,
+            porcentaje=100,
+            mensaje_progreso=(
+                f"Importación completada: {emparejadas} referencias emparejadas, "
+                f"{con_pdf} con paper indexado."
+            ),
+        ))
+    except Exception as e:
+        _log.error(f"[zotero] importacion_fallida doc_id={documento_id} error={e}", exc_info=True)
+        # Restaurar el estado previo: un fallo de importación no debe
+        # bloquear el documento (el riel de fases depende del estado).
+        _guardar_progreso(ProgresoAuditoriaResponse(
+            documento_id=documento_id,
+            estado=estado_previo,
+            porcentaje=100,
+            mensaje_progreso="La importación de Zotero falló.",
+            error=str(e) if isinstance(e, ValueError) else "Ocurrió un error durante la importación.",
         ))
 
 

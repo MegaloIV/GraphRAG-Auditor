@@ -112,6 +112,7 @@ class UbicacionesCitasResponse(BaseModel):
     documento_id: str
     total_citas: int
     localizadas: int
+    pagina_referencias: Optional[int] = None   # página 1-based de la sección de referencias
     ubicaciones: list[UbicacionCita]
 
 

@@ -301,7 +301,7 @@ async def ver_ubicaciones_citas(documento_id: str):
     llegan con pagina_real=None y rects=[].
     """
     try:
-        ubicaciones = localizacion_service.obtener_ubicaciones(documento_id)
+        datos = localizacion_service.obtener_ubicaciones(documento_id)
     except Exception as e:
         logger.error("error_ubicaciones_citas", doc_id=documento_id, error=str(e))
         raise HTTPException(status_code=500, detail={
@@ -310,17 +310,19 @@ async def ver_ubicaciones_citas(documento_id: str):
             "accion_sugerida": "Intenta nuevamente.",
         })
 
-    if ubicaciones is None:
+    if datos is None:
         raise HTTPException(status_code=404, detail={
             "codigo": "DOCUMENTO_NO_ENCONTRADO",
             "mensaje": "No se encontró el PDF del documento.",
             "accion_sugerida": "Vuelve a cargar el archivo PDF.",
         })
 
+    ubicaciones = datos["ubicaciones"]
     return UbicacionesCitasResponse(
         documento_id=documento_id,
         total_citas=len(ubicaciones),
         localizadas=sum(1 for u in ubicaciones if u.pagina_real is not None),
+        pagina_referencias=datos["pagina_referencias"],
         ubicaciones=ubicaciones,
     )
 
@@ -476,11 +478,13 @@ async def subir_paper_manual(
     archivo: UploadFile = File(...),
 ):
     """
-    Permite al usuario adjuntar el PDF de un paper cuando CrossRef/Unpaywall
-    no lo encontraron automáticamente. El texto se extrae, se genera el embedding
-    y se indexa en Supabase. El nodo Referencia se actualiza en Neo4j.
+    Adjunta (o REEMPLAZA) el PDF del paper de una referencia. Si la referencia
+    ya tenía un paper indexado, sus chunks se eliminan antes de indexar el
+    nuevo. El nodo Referencia se actualiza en Neo4j.
     """
     from app.services.externo.embedding_service import embedding_service
+    from app.services.externo.doi_utils import normalizar_doi, doi_para_chunks
+    from app.services.vectorstore.supabase_service import supabase_vector_service
     import pymupdf4llm
 
     contenido = await archivo.read()
@@ -525,6 +529,15 @@ async def subir_paper_manual(
 
     # Indexar en Supabase con doi sintético basado en referencia_id
     doi_manual = f"manual_{referencia_id}"
+
+    # Si ya había un paper asociado con otro DOI, eliminar sus chunks para
+    # que la auditoría no recupere evidencia del paper anterior.
+    doi_previo = normalizar_doi(r.get("doi_verificado")) or (r.get("doi_verificado") or "")
+    if doi_previo and doi_previo != doi_manual:
+        try:
+            supabase_vector_service.eliminar_chunks_por_doi(doi_para_chunks(doi_previo))
+        except Exception as e:
+            logger.warning("chunks_previos_no_eliminados", ref_id=referencia_id, error=str(e))
     metadata = {
         "doi": doi_manual,
         "doi_normalizado": doi_manual.replace("/", "_").replace(".", "_"),
@@ -555,3 +568,56 @@ async def subir_paper_manual(
 
     logger.info("paper_manual_indexado", ref_id=referencia_id, doi=doi_manual)
     return {"nivel_confianza": "manual", "doi": doi_manual, "mensaje": "Paper indexado correctamente."}
+
+
+@router.delete(
+    "/{documento_id}/referencias/{referencia_id}/paper",
+    summary="Quitar el paper asociado a una referencia",
+)
+async def quitar_paper(documento_id: str, referencia_id: str):
+    """
+    Desasocia el paper de la referencia: elimina sus chunks del vector store
+    y la devuelve al estado 'no_encontrado' (lista para subir otro PDF o
+    re-importar desde Zotero). Los veredictos previos de sus citas quedan
+    obsoletos: conviene re-auditar.
+    """
+    from app.services.externo.doi_utils import normalizar_doi, doi_para_chunks
+    from app.services.vectorstore.supabase_service import supabase_vector_service
+
+    try:
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            record = session.run(
+                "MATCH (r:Referencia {id: $ref_id}) RETURN r.doi_verificado AS doi",
+                ref_id=referencia_id,
+            ).single()
+            if not record:
+                raise _referencia_no_encontrada(referencia_id)
+
+            doi_previo = normalizar_doi(record["doi"]) or (record["doi"] or "")
+            for doi in {doi_previo, f"manual_{referencia_id}"}:
+                if doi:
+                    supabase_vector_service.eliminar_chunks_por_doi(doi_para_chunks(doi))
+
+            session.run(
+                """
+                MATCH (r:Referencia {id: $ref_id})
+                SET r.doi_verificado = null,
+                    r.titulo_oficial = null,
+                    r.score_crossref = null,
+                    r.nivel_confianza = 'no_encontrado',
+                    r.verificado = false
+                """,
+                ref_id=referencia_id,
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("error_quitar_paper", ref_id=referencia_id, error=str(e))
+        raise HTTPException(status_code=500, detail={
+            "codigo": "ERROR_INTERNO",
+            "mensaje": str(e),
+            "accion_sugerida": "Intenta nuevamente.",
+        })
+
+    logger.info("paper_desasociado", ref_id=referencia_id)
+    return {"referencia_id": referencia_id, "nivel_confianza": "no_encontrado", "mensaje": "Paper desasociado."}

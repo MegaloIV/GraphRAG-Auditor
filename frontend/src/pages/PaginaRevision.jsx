@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import { Plus, RefreshCcw, CheckCheck } from 'lucide-react'
+import { Plus, RefreshCcw, CheckCheck, BookMarked } from 'lucide-react'
 import VisorPDF from '../components/VisorPDF'
 import CartillaCita from '../components/CartillaCita'
 import CartillaReferencia from '../components/CartillaReferencia'
@@ -16,6 +16,8 @@ export default function PaginaRevision() {
   const [citas, setCitas] = useState(null)
   const [referencias, setReferencias] = useState(null)
   const [ubicaciones, setUbicaciones] = useState(null)
+  const [paginaReferencias, setPaginaReferencias] = useState(null)
+  const [salto, setSalto] = useState(null)
   const [errorCarga, setErrorCarga] = useState(null)
   const [errorAccion, setErrorAccion] = useState(null)
 
@@ -24,6 +26,17 @@ export default function PaginaRevision() {
   const [foco, setFoco] = useState(null)
   const [confirmando, setConfirmando] = useState(false)
   const [reVinculando, setReVinculando] = useState(false)
+  const cartillasRef = useRef({})
+
+  // Clic en una cita subrayada del PDF → mostrar y enfocar su cartilla.
+  const seleccionarDesdePDF = useCallback((citaId) => {
+    setPestana('citas')
+    setSoloSinVincular(false) // por si el filtro la está ocultando
+    setFoco(citaId)
+    setTimeout(() => {
+      cartillasRef.current[citaId]?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }, 80)
+  }, [])
 
   const cargarTodo = useCallback(async () => {
     setErrorCarga(null)
@@ -41,7 +54,10 @@ export default function PaginaRevision() {
 
   const cargarUbicaciones = useCallback(() => {
     grafoAPI.verUbicaciones(documentoId)
-      .then((res) => setUbicaciones(res.data.ubicaciones))
+      .then((res) => {
+        setUbicaciones(res.data.ubicaciones)
+        setPaginaReferencias(res.data.pagina_referencias)
+      })
       .catch(() => setUbicaciones([])) // sin ubicaciones el visor sigue sirviendo
   }, [documentoId])
 
@@ -186,17 +202,34 @@ export default function PaginaRevision() {
 
       <div className="revision-grid">
         <div className="panel-pdf">
-          <VisorPDF url={ingestaAPI.urlPDF(documentoId)} ubicaciones={ubicaciones} foco={foco} />
+          <VisorPDF
+            url={ingestaAPI.urlPDF(documentoId)}
+            ubicaciones={ubicaciones}
+            foco={foco}
+            salto={salto}
+            onSeleccionarCita={seleccionarDesdePDF}
+          />
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
-          <div className="pestanas">
+          <div className="pestanas" style={{ alignItems: 'center' }}>
             <button className={`pestana ${pestana === 'citas' ? 'activa' : ''}`} onClick={() => setPestana('citas')}>
               Citas ({citas.length})
             </button>
             <button className={`pestana ${pestana === 'referencias' ? 'activa' : ''}`} onClick={() => setPestana('referencias')}>
               Referencias ({referencias.length})
             </button>
+            {paginaReferencias && (
+              <button
+                className="btn btn-contorno"
+                style={{ marginLeft: 'auto', padding: '5px 12px', fontSize: 12.5 }}
+                title={`Ir a la página ${paginaReferencias} del PDF`}
+                onClick={() => setSalto({ pagina: paginaReferencias, t: Date.now() })}
+              >
+                <BookMarked size={13} />
+                Ver referencias en el PDF
+              </button>
+            )}
           </div>
 
           {pestana === 'citas' && (
@@ -224,16 +257,17 @@ export default function PaginaRevision() {
                   <EstadoVacio titulo="No hay citas que mostrar" detalle={soloSinVincular ? 'Todas las citas están vinculadas.' : undefined} />
                 )}
                 {citasVisibles.map((cita) => (
-                  <CartillaCita
-                    key={cita.cita_id}
-                    cita={cita}
-                    referencias={referencias}
-                    localizada={localizadaPorId[cita.cita_id] !== false}
-                    seleccionada={foco === cita.cita_id}
-                    onEnfocar={setFoco}
-                    onGuardar={guardarCita}
-                    onEliminar={eliminarCita}
-                  />
+                  <div key={cita.cita_id} ref={(el) => { cartillasRef.current[cita.cita_id] = el }}>
+                    <CartillaCita
+                      cita={cita}
+                      referencias={referencias}
+                      localizada={localizadaPorId[cita.cita_id] !== false}
+                      seleccionada={foco === cita.cita_id}
+                      onEnfocar={setFoco}
+                      onGuardar={guardarCita}
+                      onEliminar={eliminarCita}
+                    />
+                  </div>
                 ))}
               </div>
             </>

@@ -35,6 +35,19 @@ def _objeto_pdf(documento_id: str) -> str:
     return f"uploads/{documento_id}.pdf"
 
 
+# Términos del encabezado de la sección de referencias, por especificidad.
+# search_for es case-insensitive; se toma la ÚLTIMA página con match porque
+# el término también aparece antes en el índice y en menciones del cuerpo.
+_TERMINOS_REFERENCIAS = [
+    "referencias bibliográficas",
+    "lista de referencias",
+    "referencias",
+    "bibliografía",
+    "references",
+    "bibliography",
+]
+
+
 def _variantes_busqueda(texto_cita: str) -> list[str]:
     """
     Variantes del texto de la cita para buscar en el PDF, en orden de
@@ -64,15 +77,22 @@ def _variantes_busqueda(texto_cita: str) -> list[str]:
 
 class LocalizacionService:
 
-    def obtener_ubicaciones(self, documento_id: str) -> list[UbicacionCita] | None:
+    def obtener_ubicaciones(self, documento_id: str) -> dict | None:
         """
-        Ubicaciones de todas las citas del documento. Usa el cache de Storage
-        si existe; si no, localiza y persiste. None si el PDF no existe.
+        Ubicaciones de todas las citas + página de la sección de referencias.
+        Retorna {"pagina_referencias": int|None, "ubicaciones": [UbicacionCita]}
+        usando el cache de Storage si existe. None si el PDF no existe.
         """
         crudo = storage_service.leer_texto(_objeto_cache(documento_id))
         if crudo is not None:
             try:
-                return [UbicacionCita(**u) for u in json.loads(crudo)]
+                datos = json.loads(crudo)
+                # Los caches del formato viejo (lista plana) se recalculan.
+                if isinstance(datos, dict):
+                    return {
+                        "pagina_referencias": datos.get("pagina_referencias"),
+                        "ubicaciones": [UbicacionCita(**u) for u in datos["ubicaciones"]],
+                    }
             except Exception as e:
                 logger.warning("cache_ubicaciones_corrupto", doc_id=documento_id, error=str(e))
 
@@ -81,13 +101,19 @@ class LocalizacionService:
             return None
 
         citas = self._leer_citas(documento_id)
-        ubicaciones = self._localizar(str(ruta_pdf), citas)
+        ubicaciones, pagina_referencias = self._localizar(str(ruta_pdf), citas)
 
         storage_service.subir_texto(
             _objeto_cache(documento_id),
-            json.dumps([u.model_dump() for u in ubicaciones], ensure_ascii=False),
+            json.dumps(
+                {
+                    "pagina_referencias": pagina_referencias,
+                    "ubicaciones": [u.model_dump() for u in ubicaciones],
+                },
+                ensure_ascii=False,
+            ),
         )
-        return ubicaciones
+        return {"pagina_referencias": pagina_referencias, "ubicaciones": ubicaciones}
 
     def invalidar_cache(self, documento_id: str) -> None:
         """Se llama al editar/crear/eliminar citas para recalcular en la próxima lectura."""
@@ -100,7 +126,8 @@ class LocalizacionService:
         localizadas conservan su estimación. Además deja el cache de
         ubicaciones listo para la fase de revisión. Retorna cuántas actualizó.
         """
-        ubicaciones = self.obtener_ubicaciones(documento_id)
+        datos = self.obtener_ubicaciones(documento_id)
+        ubicaciones = datos["ubicaciones"] if datos else []
         if not ubicaciones:
             return 0
 
@@ -133,13 +160,16 @@ class LocalizacionService:
                 for rec in session.run(query, doc_id=documento_id)
             ]
 
-    def _localizar(self, ruta_pdf: str, citas: list[tuple[str, str]]) -> list[UbicacionCita]:
+    def _localizar(
+        self, ruta_pdf: str, citas: list[tuple[str, str]]
+    ) -> tuple[list[UbicacionCita], int | None]:
         import fitz
 
         ubicaciones: list[UbicacionCita] = []
         with fitz.open(ruta_pdf) as doc:
             for cita_id, texto_cita in citas:
                 ubicaciones.append(self._localizar_cita(doc, cita_id, texto_cita))
+            pagina_referencias = self._pagina_referencias(doc)
 
         localizadas = sum(1 for u in ubicaciones if u.pagina_real is not None)
         logger.info(
@@ -147,8 +177,22 @@ class LocalizacionService:
             total=len(ubicaciones),
             localizadas=localizadas,
             no_localizadas=len(ubicaciones) - localizadas,
+            pagina_referencias=pagina_referencias,
         )
-        return ubicaciones
+        return ubicaciones, pagina_referencias
+
+    @staticmethod
+    def _pagina_referencias(doc) -> int | None:
+        """Página (1-based) donde empieza la sección de referencias del PDF."""
+        for termino in _TERMINOS_REFERENCIAS:
+            paginas = [
+                numero
+                for numero, page in enumerate(doc, start=1)
+                if page.search_for(termino)
+            ]
+            if paginas:
+                return paginas[-1]
+        return None
 
     def _localizar_cita(self, doc, cita_id: str, texto_cita: str) -> UbicacionCita:
         """Primer match gana: se prueba cada variante en todas las páginas."""
