@@ -13,10 +13,10 @@ function FilaVeredicto({ v }) {
     <div className="tarjeta" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
       <button
         onClick={() => setAbierto(!abierto)}
-        style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', padding: 0, color: 'inherit', width: '100%' }}
+        style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', padding: 0, color: 'inherit', width: '100%', flexWrap: 'wrap' }}
       >
         <BadgeVeredicto veredicto={v.veredicto} />
-        <span className="texto-doc" style={{ flex: 1, minWidth: 0, fontWeight: 600 }}>{v.texto_cita}</span>
+        <span className="texto-doc" style={{ flex: 1, minWidth: 160, fontWeight: 600 }}>{v.texto_cita}</span>
         <span className="badge badge-neutro">pág. {v.pagina}</span>
         {v.similitud > 0 && <span className="badge badge-neutro">similitud {pct(v.similitud)}</span>}
         {abierto ? <ChevronUp size={16} /> : <ChevronDown size={16} />}

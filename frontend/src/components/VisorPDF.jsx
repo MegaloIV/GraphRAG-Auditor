@@ -9,7 +9,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url
 ).toString()
 
-const ANCHO_PAGINA = 700
+const ANCHO_MAXIMO = 700
 const VENTANA = 4 // páginas renderizadas a cada lado de la visible
 
 // Visor del PDF real (B1) con capa de texto seleccionable (copiar/pegar hacia
@@ -24,11 +24,28 @@ export default function VisorPDF({ url, ubicaciones, foco, salto, onSeleccionarC
   const [error, setError] = useState(null)
   const [parpadeo, setParpadeo] = useState(false)
   const [paginaVisible, setPaginaVisible] = useState(1)
-  const [altoPagina, setAltoPagina] = useState(Math.round(ANCHO_PAGINA * 1.414))
+  // Ancho de página adaptativo: llena el contenedor hasta un máximo de 700px,
+  // así el visor no desborda en pantallas angostas (responsive).
+  const [anchoPagina, setAnchoPagina] = useState(ANCHO_MAXIMO)
+  const [ratioPagina, setRatioPagina] = useState(1.414)
+  const contenedorRef = useRef(null)
   const paginasRef = useRef({})
   const observerRef = useRef(null)
   // El clic vino del propio PDF: mostrar el resaltado pero no hacer scroll.
   const omitirScrollRef = useRef(false)
+
+  useEffect(() => {
+    const nodo = contenedorRef.current
+    if (!nodo) return
+    const medir = () => {
+      const disponible = nodo.clientWidth
+      if (disponible > 0) setAnchoPagina(Math.min(ANCHO_MAXIMO, disponible))
+    }
+    medir()
+    const ro = new ResizeObserver(medir)
+    ro.observe(nodo)
+    return () => ro.disconnect()
+  }, [])
 
   // Hotspots clicables de TODAS las citas localizadas, por página.
   const hotspotsPorPagina = useMemo(() => {
@@ -108,6 +125,7 @@ export default function VisorPDF({ url, ubicaciones, foco, salto, onSeleccionarC
   }
 
   return (
+    <div ref={contenedorRef}>
     <Document
       file={url}
       onLoadSuccess={({ numPages }) => setNumPaginas(numPages)}
@@ -118,7 +136,7 @@ export default function VisorPDF({ url, ubicaciones, foco, salto, onSeleccionarC
         Array.from({ length: numPaginas }, (_, i) => i + 1).map((num) => {
           const renderizar = Math.abs(num - paginaVisible) <= VENTANA
           const escalar = (r) => {
-            const escala = ANCHO_PAGINA / r.ancho_pagina
+            const escala = anchoPagina / r.ancho_pagina
             return {
               left: r.x0 * escala,
               top: r.y0 * escala,
@@ -131,18 +149,18 @@ export default function VisorPDF({ url, ubicaciones, foco, salto, onSeleccionarC
               key={num}
               className="pagina-pdf"
               data-pagina={num}
-              style={renderizar ? undefined : { width: ANCHO_PAGINA, height: altoPagina, background: 'var(--bg-surface)' }}
+              style={renderizar ? undefined : { width: anchoPagina, height: Math.round(anchoPagina * ratioPagina), background: 'var(--bg-surface)' }}
               ref={(el) => { paginasRef.current[num] = el }}
             >
               {renderizar && (
                 <>
                   <Page
                     pageNumber={num}
-                    width={ANCHO_PAGINA}
+                    width={anchoPagina}
                     renderAnnotationLayer={false}
                     onLoadSuccess={(page) => {
-                      const alto = Math.round((page.height / page.width) * ANCHO_PAGINA)
-                      setAltoPagina((prev) => (prev === alto ? prev : alto))
+                      const ratio = page.height / page.width
+                      setRatioPagina((prev) => (Math.abs(prev - ratio) < 0.001 ? prev : ratio))
                     }}
                   />
                   {(hotspotsPorPagina[num] || []).map((h, i) => (
@@ -180,5 +198,6 @@ export default function VisorPDF({ url, ubicaciones, foco, salto, onSeleccionarC
           )
         })}
     </Document>
+    </div>
   )
 }
