@@ -28,7 +28,7 @@ function DetalleNodo({ nodo, onCerrar }) {
   return (
     <aside
       className="tarjeta tarjeta-pad"
-      style={{ position: 'absolute', top: 14, right: 14, width: 320, zIndex: 10, display: 'flex', flexDirection: 'column', gap: 9, maxHeight: '85%', overflowY: 'auto' }}
+      style={{ position: 'absolute', top: 14, right: 14, width: 'min(320px, calc(100% - 28px))', zIndex: 10, display: 'flex', flexDirection: 'column', gap: 9, maxHeight: '85%', overflowY: 'auto' }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span className="badge badge-accent">{nodo.tipo}</span>
