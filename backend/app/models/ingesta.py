@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 class EstadoIngesta(str, Enum):
     PENDIENTE = "pendiente"
     PROCESANDO = "procesando"
+    REVISION_PENDIENTE = "revision_pendiente"
     LISTO_EXTRACCION = "listo_extraccion"
     VERIFICANDO = "verificando"
     COMPLETADO = "completado"

@@ -41,8 +41,8 @@ router = APIRouter(prefix="/auditoria", tags=["Auditoría"])
 async def auditar_documento(documento_id: str):
     """
     Ejecuta la auditoría semántica completa:
-    por cada cita recupera evidencia del grafo + ChromaDB
-    y emite un veredicto con GPT-4o-mini.
+    por cada cita recupera evidencia del grafo + Supabase/pgvector
+    y emite un veredicto con gpt-5.4-mini.
     Persiste los veredictos en Neo4j.
     """
     try:
@@ -244,7 +244,7 @@ async def ver_alertas(documento_id: str):
 async def ver_alertas_alucinaciones(documento_id: str):
     """
     Lista las citas con veredicto NO_VERIFICABLE — aquellas para las que
-    el sistema no encontró evidencia en el grafo ni en ChromaDB.
+    el sistema no encontró evidencia en el grafo ni en Supabase/pgvector.
     El revisor no debe confiar ciegamente en estos casos.
     """
     query = """
@@ -397,11 +397,14 @@ async def ver_metricas(documento_id: str):
     "/{documento_id}/metricas/exportar",
     summary="Exportar informe completo de auditoría a Excel",
 )
-async def exportar_metricas_excel(documento_id: str):
+async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False):
     """
     Genera un Excel con dos hojas:
     - Resumen: estadísticas generales del documento
-    - Citas:   detalle por cita con veredicto, fragmentos y métricas RAGAS
+    - Citas:   detalle por cita con veredicto y fragmentos
+
+    Las métricas RAGAS (calidad interna del sistema) NO van en el informe del
+    usuario; solo se incluyen con ?incluir_ragas=true (vista de administración).
     """
     _Q_CITAS_DETALLE = """
     MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
@@ -507,7 +510,17 @@ async def exportar_metricas_excel(documento_id: str):
             ws.cell(row=fila, column=2, value=valor).alignment = center
             return fila + 1
 
-        fila = 1
+        # Portada del resumen
+        c = ws_res.cell(row=1, column=1, value="INFORME DE AUDITORÍA DE CITAS")
+        c.font = Font(bold=True, size=14, color="1E293B")
+        ws_res.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2)
+        ws_res.row_dimensions[1].height = 26
+        from datetime import datetime
+        c = ws_res.cell(row=2, column=1, value=f"Generado el {datetime.now().strftime('%d/%m/%Y %H:%M')} · GraphAuditor")
+        c.font = Font(size=9, color="64748B")
+        ws_res.merge_cells(start_row=2, start_column=1, end_row=2, end_column=2)
+
+        fila = 4
         fila = _escribir_seccion(ws_res, fila, "REFERENCIAS")
         total_refs = refs_raw["total_referencias"] if refs_raw else 0
         con_texto  = refs_raw["con_texto"] if refs_raw else 0
@@ -525,18 +538,20 @@ async def exportar_metricas_excel(documento_id: str):
         sin_ref_cnt   = sin_ref["total"] if sin_ref else 0
         fila = _escribir_fila(ws_res, fila, "Total citas identificadas", total_citas)
         fila = _escribir_fila(ws_res, fila, "Citas sin referencia bibliográfica", sin_ref_cnt)
-        fila = _escribir_fila(ws_res, fila, "Veredicto SUPPORTS (respaldadas)", supports_cnt)
-        fila = _escribir_fila(ws_res, fila, "Veredicto REFUTES (refutadas)", refutes_cnt)
-        fila = _escribir_fila(ws_res, fila, "Veredicto NO_INFO (no verificables)", no_info_cnt)
+        fila = _escribir_fila(ws_res, fila, "Citas respaldadas por su fuente", supports_cnt)
+        fila = _escribir_fila(ws_res, fila, "Citas refutadas por su fuente", refutes_cnt)
+        fila = _escribir_fila(ws_res, fila, "Citas sin evidencia verificable", no_info_cnt)
 
-        fila += 1
-        total_ev = ragas_prom["total_evaluadas"] if ragas_prom else 0
-        if total_ev:
-            fila = _escribir_seccion(ws_res, fila, "MÉTRICAS RAGAS")
-            fila = _escribir_fila(ws_res, fila, "Citas evaluadas con RAGAS", int(total_ev))
-            fila = _escribir_fila(ws_res, fila, "Faithfulness (promedio)", _r(ragas_prom["faithfulness_avg"]))
-            fila = _escribir_fila(ws_res, fila, "Answer Relevancy (promedio)", _r(ragas_prom["relevancy_avg"]))
-            fila = _escribir_fila(ws_res, fila, "Context Precision (promedio)", _r(ragas_prom["precision_avg"]))
+        # Métricas RAGAS: solo en la exportación de administración (D9).
+        if incluir_ragas:
+            fila += 1
+            total_ev = ragas_prom["total_evaluadas"] if ragas_prom else 0
+            if total_ev:
+                fila = _escribir_seccion(ws_res, fila, "MÉTRICAS RAGAS (uso interno)")
+                fila = _escribir_fila(ws_res, fila, "Citas evaluadas con RAGAS", int(total_ev))
+                fila = _escribir_fila(ws_res, fila, "Faithfulness (promedio)", _r(ragas_prom["faithfulness_avg"]))
+                fila = _escribir_fila(ws_res, fila, "Answer Relevancy (promedio)", _r(ragas_prom["relevancy_avg"]))
+                fila = _escribir_fila(ws_res, fila, "Context Precision (promedio)", _r(ragas_prom["precision_avg"]))
 
         ws_res.column_dimensions["A"].width = 42
         ws_res.column_dimensions["B"].width = 16
@@ -544,67 +559,68 @@ async def exportar_metricas_excel(documento_id: str):
         # ── Hoja 2: Citas ────────────────────────────────────────────────────
         ws_citas = wb.create_sheet("Citas")
 
-        encabezados = [
-            "Paper (título)",
-            "Cita APA",
-            "Afirmación del tesista",
-            "Fragmento del paper",
-            "Pág. tesis",
-            "Pág. paper",
-            "Veredicto",
-            "Justificación",
-            "Faithfulness",
-            "Answer Relevancy",
-            "Context Precision",
-        ]
+        VEREDICTO_LEGIBLE = {
+            "SUPPORTS": "Respaldada",
+            "REFUTES": "Refutada",
+            "NO_INFO": "Sin evidencia",
+        }
 
-        for col_idx, titulo in enumerate(encabezados, start=1):
+        encabezados = [
+            ("Cita APA", 22),
+            ("Afirmación del tesista", 48),
+            ("Veredicto", 15),
+            ("Justificación", 48),
+            ("Fragmento del paper (evidencia)", 55),
+            ("Fuente (paper)", 40),
+            ("Pág. tesis", 10),
+            ("Pág. paper", 10),
+        ]
+        if incluir_ragas:
+            encabezados += [("Faithfulness", 13), ("Answer Relevancy", 15), ("Context Precision", 15)]
+
+        for col_idx, (titulo, ancho) in enumerate(encabezados, start=1):
             c = ws_citas.cell(row=1, column=col_idx, value=titulo)
             c.fill = header_fill
             c.font = header_font
             c.alignment = header_align
-        ws_citas.row_dimensions[1].height = 32
+            ws_citas.column_dimensions[c.column_letter].width = ancho
+        ws_citas.row_dimensions[1].height = 30
 
         for fila_idx, reg in enumerate(citas_raw, start=2):
             titulo_paper = reg["titulo_oficial"] or reg["titulo_referencia"] or ""
-            ws_citas.cell(row=fila_idx, column=1,  value=titulo_paper).alignment = wrap
-            ws_citas.cell(row=fila_idx, column=2,  value=reg["texto_cita"] or "").alignment = wrap
-            ws_citas.cell(row=fila_idx, column=3,  value=reg["fragmento_oracion"] or "").alignment = wrap
-            ws_citas.cell(row=fila_idx, column=4,  value=reg["fragmento_paper"] or "").alignment = wrap
-            ws_citas.cell(row=fila_idx, column=5,  value=reg["pagina_tesis"] or "").alignment = center
-            ws_citas.cell(row=fila_idx, column=6,  value=reg["pagina_paper"] or "").alignment = center
-            ws_citas.cell(row=fila_idx, column=7,  value=reg["veredicto"] or "").alignment = center
-            ws_citas.cell(row=fila_idx, column=8,  value=reg["justificacion"] or "").alignment = wrap
-            ws_citas.cell(row=fila_idx, column=9,  value=_r(reg["faithfulness"])).alignment = center
-            ws_citas.cell(row=fila_idx, column=10, value=_r(reg["answer_relevancy"])).alignment = center
-            ws_citas.cell(row=fila_idx, column=11, value=_r(reg["context_precision"])).alignment = center
-
             veredicto = reg["veredicto"] or ""
-            if veredicto == "SUPPORTS":
-                row_fill = FILL_SUPPORTS
-            elif veredicto == "REFUTES":
-                row_fill = FILL_REFUTES
-            elif veredicto == "NO_INFO":
-                row_fill = FILL_NO_INFO
-            else:
-                row_fill = None
+            valores = [
+                (reg["texto_cita"] or "", wrap),
+                (reg["fragmento_oracion"] or "", wrap),
+                (VEREDICTO_LEGIBLE.get(veredicto, "Sin auditar"), center),
+                (reg["justificacion"] or "", wrap),
+                (reg["fragmento_paper"] or "", wrap),
+                (titulo_paper, wrap),
+                (reg["pagina_tesis"] or "", center),
+                (reg["pagina_paper"] or "", center),
+            ]
+            if incluir_ragas:
+                valores += [
+                    (_r(reg["faithfulness"]), center),
+                    (_r(reg["answer_relevancy"]), center),
+                    (_r(reg["context_precision"]), center),
+                ]
 
-            if row_fill:
-                for col_idx in range(1, 12):
-                    ws_citas.cell(row=fila_idx, column=col_idx).fill = row_fill
+            row_fill = {
+                "SUPPORTS": FILL_SUPPORTS,
+                "REFUTES": FILL_REFUTES,
+                "NO_INFO": FILL_NO_INFO,
+            }.get(veredicto)
 
-        ws_citas.column_dimensions["A"].width = 40
-        ws_citas.column_dimensions["B"].width = 22
-        ws_citas.column_dimensions["C"].width = 45
-        ws_citas.column_dimensions["D"].width = 55
-        ws_citas.column_dimensions["E"].width = 10
-        ws_citas.column_dimensions["F"].width = 10
-        ws_citas.column_dimensions["G"].width = 14
-        ws_citas.column_dimensions["H"].width = 45
-        ws_citas.column_dimensions["I"].width = 15
-        ws_citas.column_dimensions["J"].width = 17
-        ws_citas.column_dimensions["K"].width = 17
+            for col_idx, (valor, alineacion) in enumerate(valores, start=1):
+                celda = ws_citas.cell(row=fila_idx, column=col_idx, value=valor)
+                celda.alignment = alineacion
+                celda.font = Font(size=10)
+                if row_fill:
+                    celda.fill = row_fill
+
         ws_citas.freeze_panes = "A2"
+        ws_citas.auto_filter.ref = f"A1:{ws_citas.cell(row=1, column=len(encabezados)).column_letter}{max(len(citas_raw) + 1, 2)}"
 
         buffer = io.BytesIO()
         wb.save(buffer)

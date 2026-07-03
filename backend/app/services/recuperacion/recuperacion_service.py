@@ -38,7 +38,7 @@ class NodoGrafo:
 class ResultadoRecuperacion:
     cita_id: str
     texto_cita: str
-    fragmento_relevante: str       # chunk de ChromaDB más similar
+    fragmento_relevante: str       # chunk de Supabase/pgvector más similar
     similitud: float               # 0..1
     nodos_grafo: list[NodoGrafo]   # ruta de evidencia HU-009
     doi_referencia: Optional[str]
@@ -98,7 +98,7 @@ class RecuperacionService:
     def estado_motor(self, documento_id: str) -> EstadoMotor:
         """
         Verifica que el motor está listo para auditar el documento:
-        - Hay chunks en ChromaDB (al menos para alguna referencia del doc)
+        - Hay chunks en Supabase/pgvector (al menos para alguna referencia del doc)
         - Hay citas vinculadas a referencias en Neo4j
         """
         try:
@@ -161,7 +161,7 @@ class RecuperacionService:
     ) -> ResultadoRecuperacion:
         """
         Recupera la evidencia para una cita específica.
-        Combina traversal de grafo + búsqueda vectorial en ChromaDB.
+        Combina traversal de grafo + búsqueda vectorial en Supabase/pgvector.
         """
         # Paso 1: obtener la ruta del grafo (Neo4j)
         ruta = self._obtener_ruta_grafo(documento_id, cita_id)
@@ -238,7 +238,7 @@ class RecuperacionService:
                     chunk_index=chunk_index,
                 )
 
-        # Fallback: solo grafo (no hay chunks de ese paper en ChromaDB)
+        # Fallback: solo grafo (no hay chunks de ese paper en Supabase/pgvector)
         if ref_id:
             return ResultadoRecuperacion(
                 cita_id=cita_id,

@@ -1,11 +1,16 @@
 """
 Servicio orquestador de verificación externa de referencias.
-Une CrossRef + Unpaywall + ChromaDB + Neo4j.
+Une CrossRef + Unpaywall + Supabase/pgvector + Neo4j.
 
-Flujo por referencia:
-1. CrossRef  → ¿existe? + abstract
+La verificación automática opera SOLO con el DOI de la referencia: la antigua
+búsqueda en CrossRef por título/autor traía papers equivocados. Sin DOI, la
+referencia queda 'no_encontrado' y se resuelve importando la colección de
+Zotero (.ris/.zip) o subiendo el PDF manualmente.
+
+Flujo por referencia (con DOI):
+1. CrossRef GET /works/{doi} → título oficial + abstract (sin adivinar)
 2. Unpaywall → ¿hay PDF gratuito? → texto completo
-3. ChromaDB  → generar y guardar embedding
+3. Supabase/pgvector  → generar y guardar embedding
 4. Neo4j     → actualizar nodo Referencia con resultados
 """
 import structlog
@@ -13,6 +18,7 @@ import structlog
 from app.services.externo.crossref_service import crossref_service
 from app.services.externo.unpaywall_service import unpaywall_service
 from app.services.externo.embedding_service import embedding_service
+from app.services.externo.doi_utils import normalizar_doi, doi_para_chunks
 from app.services.grafo.neo4j_service import neo4j_service
 from app.models.grafo import ReferenciaAPA
 from app.core.config import get_settings
@@ -98,15 +104,16 @@ class VerificacionService:
 
     def _verificar_una_referencia(self, referencia: ReferenciaAPA) -> dict:
         """
-        Verifica una sola referencia pasando por todas las capas.
+        Verifica una referencia usando SOLO su DOI. Sin DOI no se adivina:
+        la búsqueda por título/autor generaba asociaciones erróneas.
         """
-        resultado_crossref = crossref_service.buscar_referencia(
-            titulo=referencia.titulo,
-            autores=referencia.autores,
-            anio=referencia.anio,
-        )
-
-        if not resultado_crossref.encontrado:
+        doi = normalizar_doi(referencia.doi)
+        if not doi:
+            logger.info(
+                "referencia_sin_doi_no_verificable",
+                ref_id=referencia.referencia_id,
+                titulo=referencia.titulo[:50],
+            )
             return {
                 "encontrada": False,
                 "doi": None,
@@ -114,32 +121,35 @@ class VerificacionService:
                 "texto": None,
             }
 
-        doi = resultado_crossref.doi
-        texto_disponible = resultado_crossref.abstract
+        # Metadatos oficiales por DOI directo (sin búsqueda difusa). Si
+        # CrossRef falla igual seguimos: el DOI ya es confiable.
+        resultado_crossref = crossref_service.obtener_por_doi(doi)
+        titulo_oficial = resultado_crossref.titulo_oficial if resultado_crossref.encontrado else None
+        texto_disponible = resultado_crossref.abstract if resultado_crossref.encontrado else None
         nivel_confianza = "abstract" if texto_disponible else None
 
-        if doi:
-            if embedding_service.paper_ya_indexado(doi):
-                logger.info("paper_ya_en_cache", doi=doi)
-                return {
-                    "encontrada": True,
-                    "doi": doi,
-                    "nivel_confianza": nivel_confianza or "cache",
-                    "texto": texto_disponible,
-                }
+        if embedding_service.paper_ya_indexado(doi):
+            logger.info("paper_ya_en_cache", doi=doi)
+            return {
+                "encontrada": True,
+                "doi": doi,
+                "nivel_confianza": nivel_confianza or "cache",
+                "texto": texto_disponible,
+                "titulo_oficial": titulo_oficial,
+                "score_coincidencia": 1.0,
+            }
 
-            resultado_unpaywall = unpaywall_service.buscar_pdf_gratuito(doi)
+        resultado_unpaywall = unpaywall_service.buscar_pdf_gratuito(doi)
+        if resultado_unpaywall.tiene_pdf_gratuito and resultado_unpaywall.texto_completo:
+            texto_disponible = resultado_unpaywall.texto_completo
+            nivel_confianza = "texto_completo"
+            logger.info("usando_texto_completo", doi=doi)
 
-            if resultado_unpaywall.tiene_pdf_gratuito and resultado_unpaywall.texto_completo:
-                texto_disponible = resultado_unpaywall.texto_completo
-                nivel_confianza = "texto_completo"
-                logger.info("usando_texto_completo", doi=doi)
-
-        if texto_disponible and doi:
+        if texto_disponible:
             metadata = {
                 "doi": doi,
-                "doi_normalizado": doi.replace("/", "_").replace(".", "_"),
-                "titulo": resultado_crossref.titulo_oficial or referencia.titulo,
+                "doi_normalizado": doi_para_chunks(doi),
+                "titulo": titulo_oficial or referencia.titulo,
                 "anio": str(resultado_crossref.anio_oficial or referencia.anio or ""),
                 "nivel_confianza": nivel_confianza,
                 "referencia_id": referencia.referencia_id,
@@ -153,10 +163,12 @@ class VerificacionService:
         return {
             "encontrada": True,
             "doi": doi,
-            "nivel_confianza": nivel_confianza,
+            # DOI válido pero sin texto descargable: se distingue de
+            # 'no_encontrado' para que la UI explique el caso.
+            "nivel_confianza": nivel_confianza or "sin_texto",
             "texto": texto_disponible,
-            "titulo_oficial": resultado_crossref.titulo_oficial,
-            "score_coincidencia": resultado_crossref.score_coincidencia,
+            "titulo_oficial": titulo_oficial,
+            "score_coincidencia": 1.0,
         }
 
     def _marcar_no_encontrada(self, referencia_id: str) -> None:

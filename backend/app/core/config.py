@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # OpenAI
     openai_api_key: str = ""
-    openai_model: str = "gpt-4o-mini"
+    openai_model: str = "gpt-5.4-mini"
     openai_embedding_model: str = "text-embedding-3-small"  # 1536 dimensiones
 
     # CrossRef / Unpaywall

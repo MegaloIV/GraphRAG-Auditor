@@ -3,7 +3,7 @@ EP-004: Auditoría Semántica y Detección de Alucinaciones
 
 Flujo por cita:
   1. recuperacion_service  → fragmento del paper + nodos del grafo
-  2. llm_service           → GPT-4o-mini decide el veredicto
+  2. llm_service           → gpt-5.4-mini decide el veredicto
   3. Neo4j                 → persiste el veredicto en el nodo Cita
 
 Veredictos:
@@ -97,7 +97,7 @@ class AuditoriaService:
     def auditar_documento(self, documento_id: str) -> list[VeredictoAuditoria]:
         """
         Itera todas las citas del documento, recupera evidencia
-        y emite un veredicto con GPT-4o-mini por cada una.
+        y emite un veredicto con gpt-5.4-mini por cada una.
         Persiste el veredicto en Neo4j.
         """
         with neo4j_service.driver.session(database=settings.neo4j_database) as session:
@@ -321,7 +321,7 @@ class AuditoriaService:
 
     def _llamar_llm(self, texto_cita: str, fragmento_oracion: str, fragmento: str) -> tuple[VeredictoTipo, str]:
         """
-        Llama a GPT-4o-mini y parsea el veredicto.
+        Llama a gpt-5.4-mini y parsea el veredicto.
         Si el LLM falla o responde de forma inesperada → NO_VERIFICABLE.
         """
         afirmacion = fragmento_oracion if fragmento_oracion else texto_cita
