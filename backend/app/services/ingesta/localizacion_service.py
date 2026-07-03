@@ -93,6 +93,33 @@ class LocalizacionService:
         """Se llama al editar/crear/eliminar citas para recalcular en la próxima lectura."""
         storage_service.eliminar(_objeto_cache(documento_id))
 
+    def sincronizar_paginas(self, documento_id: str) -> int:
+        """
+        Corrige la página de cada Cita en Neo4j con la página REAL del PDF
+        (la extracción solo estima por posición del bloque). Las citas no
+        localizadas conservan su estimación. Además deja el cache de
+        ubicaciones listo para la fase de revisión. Retorna cuántas actualizó.
+        """
+        ubicaciones = self.obtener_ubicaciones(documento_id)
+        if not ubicaciones:
+            return 0
+
+        actualizadas = 0
+        query = "MATCH (c:Cita {id: $cita_id}) SET c.pagina = $pagina"
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            for u in ubicaciones:
+                if u.pagina_real is not None:
+                    session.run(query, cita_id=u.cita_id, pagina=u.pagina_real)
+                    actualizadas += 1
+
+        logger.info(
+            "paginas_sincronizadas",
+            doc_id=documento_id,
+            actualizadas=actualizadas,
+            sin_localizar=len(ubicaciones) - actualizadas,
+        )
+        return actualizadas
+
     # ── Internos ──────────────────────────────────────────────────────────────
 
     def _leer_citas(self, documento_id: str) -> list[tuple[str, str]]:

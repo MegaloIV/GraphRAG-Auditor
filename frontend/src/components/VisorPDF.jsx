@@ -10,17 +10,20 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 ).toString()
 
 const ANCHO_PAGINA = 700
+const VENTANA = 4 // páginas renderizadas a cada lado de la visible
 
-// Visor del PDF real (B1): renderiza todas las páginas y dibuja overlays de
-// resaltado con los rects que calcula el backend (escalados por las
-// dimensiones reales de página). Al cambiar `foco`, salta a la página y
-// parpadea el resaltado ~2 s.
+// Visor del PDF real (B1) con capa de texto seleccionable (copiar/pegar hacia
+// las cartillas) y renderizado perezoso: solo se montan las páginas cercanas
+// a la visible; el resto son placeholders de altura estimada. Al cambiar
+// `foco`, salta a la página de la cita y parpadea el resaltado ~2 s.
 export default function VisorPDF({ url, ubicaciones, foco }) {
   const [numPaginas, setNumPaginas] = useState(null)
   const [error, setError] = useState(null)
   const [parpadeo, setParpadeo] = useState(false)
-  const contRef = useRef(null)
+  const [paginaVisible, setPaginaVisible] = useState(1)
+  const [altoPagina, setAltoPagina] = useState(Math.round(ANCHO_PAGINA * 1.414))
   const paginasRef = useRef({})
+  const observerRef = useRef(null)
 
   // rects por página de la cita enfocada
   const rectsPorPagina = useMemo(() => {
@@ -34,15 +37,37 @@ export default function VisorPDF({ url, ubicaciones, foco }) {
     return mapa
   }, [foco, ubicaciones])
 
+  // Observa qué página está en pantalla para mover la ventana de renderizado.
+  useEffect(() => {
+    if (!numPaginas) return
+    const obs = new IntersectionObserver(
+      (entries) => {
+        const visible = entries.find((e) => e.isIntersecting)
+        if (visible) setPaginaVisible(Number(visible.target.dataset.pagina))
+      },
+      { threshold: 0.05 }
+    )
+    observerRef.current = obs
+    Object.values(paginasRef.current).forEach((el) => el && obs.observe(el))
+    return () => obs.disconnect()
+  }, [numPaginas])
+
+  // Salto a la página de la cita enfocada: renderizarla primero (ventana) y
+  // luego hacer scroll; el resaltado parpadea ~2 s.
   useEffect(() => {
     if (!foco || !ubicaciones) return
     const ubicacion = ubicaciones.find((u) => u.cita_id === foco)
     if (!ubicacion?.pagina_real) return
-    const nodo = paginasRef.current[ubicacion.pagina_real]
-    if (nodo) nodo.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    setPaginaVisible(ubicacion.pagina_real)
+    const t0 = setTimeout(() => {
+      paginasRef.current[ubicacion.pagina_real]?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    }, 60)
     setParpadeo(true)
-    const t = setTimeout(() => setParpadeo(false), 2000)
-    return () => clearTimeout(t)
+    const t1 = setTimeout(() => setParpadeo(false), 2000)
+    return () => { clearTimeout(t0); clearTimeout(t1) }
   }, [foco, ubicaciones])
 
   if (error) {
@@ -50,41 +75,51 @@ export default function VisorPDF({ url, ubicaciones, foco }) {
   }
 
   return (
-    <div ref={contRef}>
-      <Document
-        file={url}
-        onLoadSuccess={({ numPages }) => setNumPaginas(numPages)}
-        onLoadError={() => setError(true)}
-        loading={<EstadoCarga mensaje="Cargando PDF…" />}
-      >
-        {numPaginas &&
-          Array.from({ length: numPaginas }, (_, i) => i + 1).map((num) => (
+    <Document
+      file={url}
+      onLoadSuccess={({ numPages }) => setNumPaginas(numPages)}
+      onLoadError={() => setError(true)}
+      loading={<EstadoCarga mensaje="Cargando PDF…" />}
+    >
+      {numPaginas &&
+        Array.from({ length: numPaginas }, (_, i) => i + 1).map((num) => {
+          const renderizar = Math.abs(num - paginaVisible) <= VENTANA
+          return (
             <div
               key={num}
               className="pagina-pdf"
+              data-pagina={num}
+              style={renderizar ? undefined : { width: ANCHO_PAGINA, height: altoPagina, background: 'var(--bg-surface)' }}
               ref={(el) => { paginasRef.current[num] = el }}
             >
-              <Page
-                pageNumber={num}
-                width={ANCHO_PAGINA}
-                renderTextLayer={false}
-                renderAnnotationLayer={false}
-              />
-              {(rectsPorPagina[num] || []).map((r, i) => {
-                const escala = ANCHO_PAGINA / r.ancho_pagina
-                return (
-                  <div
-                    key={i}
-                    className={`overlay-resaltado ${parpadeo ? 'parpadeo' : ''}`}
-                    style={{
-                      left: r.x0 * escala,
-                      top: r.y0 * escala,
-                      width: (r.x1 - r.x0) * escala,
-                      height: (r.y1 - r.y0) * escala,
+              {renderizar && (
+                <>
+                  <Page
+                    pageNumber={num}
+                    width={ANCHO_PAGINA}
+                    renderAnnotationLayer={false}
+                    onLoadSuccess={(page) => {
+                      const alto = Math.round((page.height / page.width) * ANCHO_PAGINA)
+                      setAltoPagina((prev) => (prev === alto ? prev : alto))
                     }}
                   />
-                )
-              })}
+                  {(rectsPorPagina[num] || []).map((r, i) => {
+                    const escala = ANCHO_PAGINA / r.ancho_pagina
+                    return (
+                      <div
+                        key={i}
+                        className={`overlay-resaltado ${parpadeo ? 'parpadeo' : ''}`}
+                        style={{
+                          left: r.x0 * escala,
+                          top: r.y0 * escala,
+                          width: (r.x1 - r.x0) * escala,
+                          height: (r.y1 - r.y0) * escala,
+                        }}
+                      />
+                    )
+                  })}
+                </>
+              )}
               <span
                 style={{
                   position: 'absolute', bottom: 4, right: 8, fontSize: 11,
@@ -95,8 +130,8 @@ export default function VisorPDF({ url, ubicaciones, foco }) {
                 {num}
               </span>
             </div>
-          ))}
-      </Document>
-    </div>
+          )
+        })}
+    </Document>
   )
 }

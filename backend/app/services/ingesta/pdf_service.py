@@ -64,6 +64,12 @@ class PDFNoProcessableError(Exception):
         super().__init__(mensaje)
 
 
+# Caracteres invisibles que el PDF suele arrastrar (zero-width space/joiner,
+# BOM, soft hyphen). Rompen los regex de detección de secciones (\s no matchea
+# U+200B) y el matching de citas, así que se eliminan del Markdown extraído.
+_RE_INVISIBLES = re.compile('[\\u200b\\u200c\\u200d\\ufeff\\u00ad]')
+
+
 class PDFExtractionService:
 
     def validar_pdf(self, contenido: bytes, nombre_archivo: str) -> None:
@@ -106,7 +112,8 @@ class PDFExtractionService:
         if ruta_cache.exists():
             logger.info("pdf_desde_cache", paginas=num_paginas, ruta=str(ruta_cache))
             texto_md = ruta_cache.read_text(encoding='utf-8')
-            return texto_md, num_paginas
+            # El cache puede venir de una versión previa sin saneo.
+            return _RE_INVISIBLES.sub('', texto_md), num_paginas
 
         # Extraer con pymupdf4llm
         try:
@@ -121,7 +128,7 @@ class PDFExtractionService:
                     accion="Verifica que el documento no esté vacío.",
                 )
 
-            texto_md = pymupdf4llm.to_markdown(str(ruta_pdf))
+            texto_md = _RE_INVISIBLES.sub('', pymupdf4llm.to_markdown(str(ruta_pdf)))
 
             if len(texto_md.strip()) < 100:
                 raise PDFNoProcessableError(

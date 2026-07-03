@@ -267,22 +267,52 @@ class EntidadExtractionService:
             except Exception as e:
                 logger.error("error_extraccion_citas", bloque=i, error=str(e))
 
-        vistas: set[tuple] = set()
-        dedup: list[CitaEnTexto] = []
-        for c in todas:
-            # Deduplicar por texto de cita + inicio del fragmento:
-            # misma cita en distinto contexto (pág. diferente) se conserva;
-            # duplicados exactos del mismo fragmento se descartan.
-            key = (c.texto_cita, c.fragmento_oracion[:80])
-            if key not in vistas:
-                vistas.add(key)
-                dedup.append(c)
-        todas = dedup
+        todas = self._deduplicar_citas(todas)
 
         logger.info("citas_detectadas_detalle", citas=[c.texto_cita for c in todas])
         logger.info("fragmentos_extraidos", fragmentos=[c.fragmento_oracion[:50] if c.fragmento_oracion else "VACÍO" for c in todas])
         logger.info("citas_extraidas", total=len(todas))
         return todas
+
+    @staticmethod
+    def _deduplicar_citas(citas: list[CitaEnTexto]) -> list[CitaEnTexto]:
+        """
+        Elimina la misma ocurrencia extraída dos veces (típico en límites de
+        bloque o cuando el LLM la reporta con más y con menos contexto).
+
+        Dos entradas con el mismo texto_cita cuyos fragmentos se contienen
+        mutuamente (normalizando espacios) son la MISMA ocurrencia: se conserva
+        la de fragmento más corto, que es la delimitación más precisa de la
+        aseveración. La misma cita en párrafos distintos (fragmentos disjuntos)
+        se conserva como ocurrencias separadas.
+        """
+        def _norm(s: str) -> str:
+            return re.sub(r'\s+', ' ', s or '').strip().lower()
+
+        dedup: list[CitaEnTexto] = []
+        indices_por_cita: dict[str, list[int]] = {}
+        descartadas = 0
+
+        for c in citas:
+            frag = _norm(c.fragmento_oracion)
+            duplicada = False
+            for idx in indices_por_cita.get(c.texto_cita, []):
+                frag_previo = _norm(dedup[idx].fragmento_oracion)
+                mismo_vacio = not frag and not frag_previo
+                contenidos = frag and frag_previo and (frag in frag_previo or frag_previo in frag)
+                if mismo_vacio or contenidos:
+                    if len(frag) < len(frag_previo):
+                        dedup[idx] = c  # quedarse con el fragmento más corto
+                    duplicada = True
+                    descartadas += 1
+                    break
+            if not duplicada:
+                indices_por_cita.setdefault(c.texto_cita, []).append(len(dedup))
+                dedup.append(c)
+
+        if descartadas:
+            logger.info("citas_duplicadas_descartadas", total=descartadas)
+        return dedup
 
     @staticmethod
     def _encontrar_inicio_referencias(texto: str):

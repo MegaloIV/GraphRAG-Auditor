@@ -380,6 +380,18 @@ def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
         resultado_vinculacion = grafo_carga_service.vincular_citas(documento_id)
         _log.info(f"[pipeline] vinculacion_completada {resultado_vinculacion}")
 
+        # Reemplazar la página estimada por bloques con la página real del PDF
+        # (PyMuPDF search_for) y dejar listo el cache de ubicaciones que usa
+        # el visor de la revisión.
+        actualizar(95, "Localizando citas en el PDF...")
+        try:
+            from app.services.ingesta.localizacion_service import localizacion_service
+            localizacion_service.sincronizar_paginas(documento_id)
+        except Exception as e:
+            # La localización es mejor-esfuerzo: si falla, las cartillas
+            # conservan la página estimada y la revisión sigue funcionando.
+            _log.warning(f"[pipeline] localizacion_fallida doc_id={documento_id} error={e}")
+
         _guardar_progreso(ProgresoAuditoriaResponse(
             documento_id=documento_id,
             estado=EstadoIngesta.REVISION_PENDIENTE,
