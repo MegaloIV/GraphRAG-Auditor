@@ -1,12 +1,28 @@
 import tempfile
+import uuid
 from pathlib import Path
 import structlog
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.core.config import get_settings
-from app.models.grafo import ReferenciasResponse, CitasResponse, ResumenGrafo, ReferenciaAPA, CitaEnTexto, TipoCita
+from app.models.grafo import (
+    ReferenciasResponse,
+    CitasResponse,
+    ResumenGrafo,
+    ReferenciaAPA,
+    CitaEnTexto,
+    TipoCita,
+    ActualizarCitaRequest,
+    CrearCitaRequest,
+    ActualizarReferenciaRequest,
+    CrearReferenciaRequest,
+    UbicacionesCitasResponse,
+)
+from app.models.ingesta import EstadoIngesta
 from app.services.grafo.grafo_carga_service import grafo_carga_service
 from app.services.grafo.neo4j_service import neo4j_service
+from app.services.ingesta.progreso_repository import progreso_repository
+from app.services.ingesta.localizacion_service import localizacion_service
 
 logger = structlog.get_logger(__name__)
 settings = get_settings()
@@ -272,6 +288,186 @@ async def ver_grafo_visual(documento_id: str):
         })
 
 
+@router.get(
+    "/{documento_id}/citas/ubicaciones",
+    response_model=UbicacionesCitasResponse,
+    summary="Ubicación exacta de cada cita en el PDF (página + rectángulos)",
+)
+async def ver_ubicaciones_citas(documento_id: str):
+    """
+    Localiza cada cita en el PDF original con PyMuPDF (search_for) y devuelve
+    página real 1-based + rectángulos de resaltado con las dimensiones de
+    página para escalar el overlay en el visor. Las citas no localizadas
+    llegan con pagina_real=None y rects=[].
+    """
+    try:
+        datos = localizacion_service.obtener_ubicaciones(documento_id)
+    except Exception as e:
+        logger.error("error_ubicaciones_citas", doc_id=documento_id, error=str(e))
+        raise HTTPException(status_code=500, detail={
+            "codigo": "ERROR_INTERNO",
+            "mensaje": str(e),
+            "accion_sugerida": "Intenta nuevamente.",
+        })
+
+    if datos is None:
+        raise HTTPException(status_code=404, detail={
+            "codigo": "DOCUMENTO_NO_ENCONTRADO",
+            "mensaje": "No se encontró el PDF del documento.",
+            "accion_sugerida": "Vuelve a cargar el archivo PDF.",
+        })
+
+    ubicaciones = datos["ubicaciones"]
+    return UbicacionesCitasResponse(
+        documento_id=documento_id,
+        total_citas=len(ubicaciones),
+        localizadas=sum(1 for u in ubicaciones if u.pagina_real is not None),
+        pagina_referencias=datos["pagina_referencias"],
+        ubicaciones=ubicaciones,
+    )
+
+
+# ── CRUD de revisión humana: citas ───────────────────────────────────────────
+
+def _cita_no_encontrada(cita_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={
+            "codigo": "CITA_NO_ENCONTRADA",
+            "mensaje": "No se encontró la cita indicada.",
+            "accion_sugerida": "Verifica el ID de la cita.",
+        },
+    )
+
+
+@router.patch(
+    "/{documento_id}/citas/{cita_id}",
+    response_model=CitaEnTexto,
+    summary="Editar una cita durante la revisión",
+)
+async def actualizar_cita(documento_id: str, cita_id: str, datos: ActualizarCitaRequest):
+    campos = datos.model_dump(exclude_unset=True)
+    actualizada = grafo_carga_service.actualizar_cita(cita_id, campos)
+    if actualizada is None:
+        raise _cita_no_encontrada(cita_id)
+    localizacion_service.invalidar_cache(documento_id)
+    return actualizada
+
+
+@router.post(
+    "/{documento_id}/citas",
+    response_model=CitaEnTexto,
+    summary="Agregar una cita manualmente durante la revisión",
+)
+async def crear_cita(documento_id: str, datos: CrearCitaRequest):
+    nueva = CitaEnTexto(
+        cita_id=str(uuid.uuid4()),
+        texto_cita=datos.texto_cita,
+        tipo=datos.tipo,
+        pagina=datos.pagina,
+        fragmento_oracion=datos.fragmento_oracion,
+    )
+    creada = grafo_carga_service.crear_cita(documento_id, nueva)
+    localizacion_service.invalidar_cache(documento_id)
+    return creada
+
+
+@router.delete(
+    "/{documento_id}/citas/{cita_id}",
+    summary="Eliminar una cita durante la revisión",
+)
+async def eliminar_cita(documento_id: str, cita_id: str):
+    grafo_carga_service.eliminar_cita(cita_id)
+    localizacion_service.invalidar_cache(documento_id)
+    return {"eliminado": True, "cita_id": cita_id}
+
+
+# ── CRUD de revisión humana: referencias ──────────────────────────────────────
+
+def _referencia_no_encontrada(referencia_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail={
+            "codigo": "REFERENCIA_NO_ENCONTRADA",
+            "mensaje": "No se encontró la referencia indicada.",
+            "accion_sugerida": "Verifica el ID de la referencia.",
+        },
+    )
+
+
+@router.patch(
+    "/{documento_id}/referencias/{referencia_id}",
+    response_model=ReferenciaAPA,
+    summary="Editar una referencia durante la revisión",
+)
+async def actualizar_referencia(
+    documento_id: str, referencia_id: str, datos: ActualizarReferenciaRequest
+):
+    campos = datos.model_dump(exclude_unset=True)
+    actualizada = grafo_carga_service.actualizar_referencia(referencia_id, campos)
+    if actualizada is None:
+        raise _referencia_no_encontrada(referencia_id)
+    return actualizada
+
+
+@router.post(
+    "/{documento_id}/referencias",
+    response_model=ReferenciaAPA,
+    summary="Agregar una referencia manualmente durante la revisión",
+)
+async def crear_referencia(documento_id: str, datos: CrearReferenciaRequest):
+    nueva = ReferenciaAPA(
+        referencia_id=str(uuid.uuid4()),
+        autores=datos.autores,
+        anio=datos.anio,
+        titulo=datos.titulo,
+        fuente=datos.fuente,
+        doi=datos.doi,
+        datos_incompletos=datos.datos_incompletos,
+        campos_faltantes=datos.campos_faltantes,
+    )
+    return grafo_carga_service.crear_referencia(documento_id, nueva)
+
+
+@router.delete(
+    "/{documento_id}/referencias/{referencia_id}",
+    summary="Eliminar una referencia durante la revisión",
+)
+async def eliminar_referencia(documento_id: str, referencia_id: str):
+    grafo_carga_service.eliminar_referencia(referencia_id)
+    return {"eliminado": True, "referencia_id": referencia_id}
+
+
+# ── Re-vinculación de citas ───────────────────────────────────────────────────
+
+@router.post(
+    "/{documento_id}/re-vincular",
+    summary="Re-ejecutar el algoritmo de vinculación Cita→Referencia",
+)
+async def re_vincular(documento_id: str):
+    progreso = progreso_repository.leer(documento_id)
+    estados_validos = {
+        EstadoIngesta.REVISION_PENDIENTE,
+        EstadoIngesta.LISTO_EXTRACCION,
+        EstadoIngesta.COMPLETADO,
+    }
+    if not progreso or progreso.estado not in estados_validos:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "codigo": "ESTADO_INVALIDO",
+                "mensaje": "El documento no está en una fase que permita re-vincular.",
+                "accion_sugerida": "Espera a que la extracción termine.",
+            },
+        )
+
+    resultado = grafo_carga_service.vincular_citas(documento_id)
+    return {
+        "citas_vinculadas": resultado["vinculadas"],
+        "citas_sin_vincular": resultado["no_vinculadas"],
+    }
+
+
 @router.post(
     "/{documento_id}/referencias/{referencia_id}/paper",
     summary="HU-VER: Subir paper manualmente para una referencia no encontrada",
@@ -282,11 +478,13 @@ async def subir_paper_manual(
     archivo: UploadFile = File(...),
 ):
     """
-    Permite al usuario adjuntar el PDF de un paper cuando CrossRef/Unpaywall
-    no lo encontraron automáticamente. El texto se extrae, se genera el embedding
-    y se indexa en Supabase. El nodo Referencia se actualiza en Neo4j.
+    Adjunta (o REEMPLAZA) el PDF del paper de una referencia. Si la referencia
+    ya tenía un paper indexado, sus chunks se eliminan antes de indexar el
+    nuevo. El nodo Referencia se actualiza en Neo4j.
     """
     from app.services.externo.embedding_service import embedding_service
+    from app.services.externo.doi_utils import normalizar_doi, doi_para_chunks
+    from app.services.vectorstore.supabase_service import supabase_vector_service
     import pymupdf4llm
 
     contenido = await archivo.read()
@@ -331,6 +529,15 @@ async def subir_paper_manual(
 
     # Indexar en Supabase con doi sintético basado en referencia_id
     doi_manual = f"manual_{referencia_id}"
+
+    # Si ya había un paper asociado con otro DOI, eliminar sus chunks para
+    # que la auditoría no recupere evidencia del paper anterior.
+    doi_previo = normalizar_doi(r.get("doi_verificado")) or (r.get("doi_verificado") or "")
+    if doi_previo and doi_previo != doi_manual:
+        try:
+            supabase_vector_service.eliminar_chunks_por_doi(doi_para_chunks(doi_previo))
+        except Exception as e:
+            logger.warning("chunks_previos_no_eliminados", ref_id=referencia_id, error=str(e))
     metadata = {
         "doi": doi_manual,
         "doi_normalizado": doi_manual.replace("/", "_").replace(".", "_"),
@@ -361,3 +568,56 @@ async def subir_paper_manual(
 
     logger.info("paper_manual_indexado", ref_id=referencia_id, doi=doi_manual)
     return {"nivel_confianza": "manual", "doi": doi_manual, "mensaje": "Paper indexado correctamente."}
+
+
+@router.delete(
+    "/{documento_id}/referencias/{referencia_id}/paper",
+    summary="Quitar el paper asociado a una referencia",
+)
+async def quitar_paper(documento_id: str, referencia_id: str):
+    """
+    Desasocia el paper de la referencia: elimina sus chunks del vector store
+    y la devuelve al estado 'no_encontrado' (lista para subir otro PDF o
+    re-importar desde Zotero). Los veredictos previos de sus citas quedan
+    obsoletos: conviene re-auditar.
+    """
+    from app.services.externo.doi_utils import normalizar_doi, doi_para_chunks
+    from app.services.vectorstore.supabase_service import supabase_vector_service
+
+    try:
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            record = session.run(
+                "MATCH (r:Referencia {id: $ref_id}) RETURN r.doi_verificado AS doi",
+                ref_id=referencia_id,
+            ).single()
+            if not record:
+                raise _referencia_no_encontrada(referencia_id)
+
+            doi_previo = normalizar_doi(record["doi"]) or (record["doi"] or "")
+            for doi in {doi_previo, f"manual_{referencia_id}"}:
+                if doi:
+                    supabase_vector_service.eliminar_chunks_por_doi(doi_para_chunks(doi))
+
+            session.run(
+                """
+                MATCH (r:Referencia {id: $ref_id})
+                SET r.doi_verificado = null,
+                    r.titulo_oficial = null,
+                    r.score_crossref = null,
+                    r.nivel_confianza = 'no_encontrado',
+                    r.verificado = false
+                """,
+                ref_id=referencia_id,
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("error_quitar_paper", ref_id=referencia_id, error=str(e))
+        raise HTTPException(status_code=500, detail={
+            "codigo": "ERROR_INTERNO",
+            "mensaje": str(e),
+            "accion_sugerida": "Intenta nuevamente.",
+        })
+
+    logger.info("paper_desasociado", ref_id=referencia_id)
+    return {"referencia_id": referencia_id, "nivel_confianza": "no_encontrado", "mensaje": "Paper desasociado."}

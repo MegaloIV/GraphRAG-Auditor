@@ -313,6 +313,70 @@ class TestDetectarInicioReferencias:
         match = service._encontrar_inicio_referencias(texto)
         assert match is None
 
+    def test_detecta_lista_de_referencias(self, service):
+        texto = "Cuerpo.\n\nLista de referencias\n\nAutor (2020). Título."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+        assert "referencias" in match.group().lower()
+
+    def test_detecta_lista_de_referencias_bibliograficas(self, service):
+        texto = "Cuerpo.\n\nLista de referencias bibliográficas\n\nAutor (2020). Título."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+
+    def test_detecta_encabezado_con_dos_puntos(self, service):
+        texto = "Cuerpo.\n\nReferencias:\n\nAutor (2020). Título."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+
+    def test_detecta_bibliografia_con_dos_puntos(self, service):
+        texto = "Cuerpo.\n\nBibliografía:\n\nAutor (2020). Título."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+
+    def test_detecta_numeracion_decimal_simple(self, service):
+        texto = "Cuerpo.\n\n3.1 Referencias\n\nAutor (2020). Título."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+
+    def test_detecta_numeracion_decimal_con_punto_final(self, service):
+        texto = "Cuerpo.\n\n3.1. Referencias bibliográficas\n\nAutor (2020). Título."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+
+    def test_detecta_numeracion_decimal_tres_niveles(self, service):
+        texto = "Cuerpo.\n\n2.3.1 Bibliografía\n\nAutor (2020). Título."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+
+    def test_detecta_reference_list_ingles(self, service):
+        texto = "Body text.\n\nReference list\n\nAuthor (2020). Title."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+
+    def test_detecta_negrita_numero_y_compuesto(self, service):
+        # Caso real: pymupdf4llm convierte heading bold con número a **7    REFERENCIAS BIBLIOGRAFICAS**
+        texto = "Cuerpo.\n\n**7    REFERENCIAS BIBLIOGRAFICAS**\n\nAutor (2021). Título."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+
+    def test_detecta_negrita_numero_tab_y_compuesto(self, service):
+        texto = "Cuerpo.\n\n**7\tREFERENCIAS BIBLIOGRAFICAS**\n\nAutor (2021). Título."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+
+    def test_detecta_markdown_heading_numero_y_compuesto(self, service):
+        # Variante con heading markdown: ## 7 REFERENCIAS BIBLIOGRAFICAS
+        texto = "Cuerpo.\n\n## 7 REFERENCIAS BIBLIOGRAFICAS\n\nAutor (2021). Título."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+
+    def test_detecta_referencias_bibliograficas_sin_acento(self, service):
+        # PDFs que pierden tilde: BIBLIOGRAFICAS en lugar de BIBLIOGRÁFICAS
+        texto = "Cuerpo.\n\n7. REFERENCIAS BIBLIOGRAFICAS\n\nAutor (2021). Título."
+        match = service._encontrar_inicio_referencias(texto)
+        assert match is not None
+
 
 @pytest.mark.skipif(
     not _PDF_TESIS.exists(),

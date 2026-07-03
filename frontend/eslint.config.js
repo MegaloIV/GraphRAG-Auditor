@@ -17,5 +17,10 @@ export default defineConfig([
       globals: globals.browser,
       parserOptions: { ecmaFeatures: { jsx: true } },
     },
+    rules: {
+      // La app carga datos con fetch-al-montar (sin librería de datos);
+      // esta regla penaliza ese patrón intencional.
+      'react-hooks/set-state-in-effect': 'off',
+    },
   },
 ])

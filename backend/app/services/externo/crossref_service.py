@@ -84,6 +84,33 @@ class CrossRefService:
 
         return ResultadoCrossRef(encontrado=False)
 
+    def obtener_por_doi(self, doi: str, intentos: int = 3) -> ResultadoCrossRef:
+        """
+        Consulta directa GET /works/{doi} — sin búsqueda por título/autor.
+        Se usa cuando la referencia ya trae DOI: aporta título oficial y
+        abstract sin riesgo de traer un paper equivocado.
+        """
+        for intento in range(1, intentos + 1):
+            try:
+                response = self._cliente.get(
+                    f"{CROSSREF_BASE_URL}/{doi}", params={"mailto": CROSSREF_MAILTO}
+                )
+                if response.status_code == 404:
+                    logger.info("crossref_doi_no_existe", doi=doi)
+                    return ResultadoCrossRef(encontrado=False)
+                response.raise_for_status()
+                item = response.json().get("message", {})
+                resultado = self._parsear_resultado(item, item.get("title", [""])[0] or "")
+                resultado.score_coincidencia = 1.0  # coincidencia por DOI, no por título
+                return resultado
+            except httpx.TimeoutException:
+                logger.warning("crossref_doi_timeout", doi=doi, intento=intento)
+                time.sleep(2 ** intento)
+            except Exception as e:
+                logger.error("crossref_doi_error", doi=doi, error=str(e), intento=intento)
+                time.sleep(1)
+        return ResultadoCrossRef(encontrado=False)
+
     def _ejecutar_busqueda(
         self,
         params: dict,

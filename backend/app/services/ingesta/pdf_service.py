@@ -16,16 +16,17 @@ settings = get_settings()
 
 PATRONES_SECCIONES: dict[TipoSeccion, list[str]] = {
     TipoSeccion.REFERENCIAS: [
-        r"^referencias?\s*$",
-        r"^bibliograf[íi]a\s*$",
-        r"^references?\s*$",
-        r"^works?\s+cited\s*$",
-        r"^referencias?\s+bibliogr[áa]ficas?\s*$",
-        r"^lista\s+de\s+referencias?\s*$",
-        r"^fuentes?\s+bibliogr[áa]ficas?\s*$",
-        r"^fuentes?\s+de\s+consulta\s*$",
-        r"^\d+[\.\s]+referencias?\s*$",
-        r"^\d+[\.\s]+bibliograf[íi]a\s*$",
+        r"^lista\s+de\s+referencias?\s*(?:bibliogr[áa]ficas?)?\s*:?\s*$",
+        r"^referencias?\s+bibliogr[áa]ficas?\s*:?\s*$",
+        r"^referencias?\s*:?\s*$",
+        r"^bibliograf[íi]a\s*:?\s*$",
+        r"^references?\s*:?\s*$",
+        r"^reference\s+list\s*:?\s*$",
+        r"^works?\s+cited\s*:?\s*$",
+        r"^fuentes?\s+bibliogr[áa]ficas?\s*:?\s*$",
+        r"^fuentes?\s+de\s+consulta\s*:?\s*$",
+        r"^\d+(?:\.\d+)*\.?\s+referencias?\s*(?:bibliogr[áa]ficas?)?\s*:?\s*$",
+        r"^\d+(?:\.\d+)*\.?\s+bibliograf[íi]a(?:\s+\w+)?\s*:?\s*$",
     ],
     TipoSeccion.INTRODUCCION: [
         r"^introducci[oó]n\s*$",
@@ -61,6 +62,12 @@ class PDFNoProcessableError(Exception):
         self.mensaje = mensaje
         self.accion = accion
         super().__init__(mensaje)
+
+
+# Caracteres invisibles que el PDF suele arrastrar (zero-width space/joiner,
+# BOM, soft hyphen). Rompen los regex de detección de secciones (\s no matchea
+# U+200B) y el matching de citas, así que se eliminan del Markdown extraído.
+_RE_INVISIBLES = re.compile('[\\u200b\\u200c\\u200d\\ufeff\\u00ad]')
 
 
 class PDFExtractionService:
@@ -105,7 +112,8 @@ class PDFExtractionService:
         if ruta_cache.exists():
             logger.info("pdf_desde_cache", paginas=num_paginas, ruta=str(ruta_cache))
             texto_md = ruta_cache.read_text(encoding='utf-8')
-            return texto_md, num_paginas
+            # El cache puede venir de una versión previa sin saneo.
+            return _RE_INVISIBLES.sub('', texto_md), num_paginas
 
         # Extraer con pymupdf4llm
         try:
@@ -120,7 +128,7 @@ class PDFExtractionService:
                     accion="Verifica que el documento no esté vacío.",
                 )
 
-            texto_md = pymupdf4llm.to_markdown(str(ruta_pdf))
+            texto_md = _RE_INVISIBLES.sub('', pymupdf4llm.to_markdown(str(ruta_pdf)))
 
             if len(texto_md.strip()) < 100:
                 raise PDFNoProcessableError(
@@ -150,6 +158,19 @@ class PDFExtractionService:
                 accion="Verifica que el archivo no esté protegido con contraseña.",
             )
 
+    # Heading line: markdown (#), bold (**text**), or plain numbered (7  TÍTULO).
+    _RE_ES_ENCABEZADO = re.compile(
+        r'^(?:#{1,3}\s|\*{1,2}.+\*{1,2}$|\d+(?:\.\d+)*\.?\s)',
+    )
+
+    @staticmethod
+    def _normalizar_titulo(linea: str) -> str:
+        """Strips # heading markers and all * bold/italic markers from a line."""
+        linea = re.sub(r"^#+\s*", "", linea).strip()
+        linea = re.sub(r"\*+", " ", linea).strip()
+        linea = re.sub(r"\s{2,}", " ", linea)
+        return linea
+
     def detectar_secciones(
         self,
         texto_md: str,
@@ -165,26 +186,28 @@ class PDFExtractionService:
         for i, linea in enumerate(lineas):
             linea_stripped = linea.strip()
 
-            if linea_stripped.startswith("#"):
-                titulo_candidato = re.sub(r"^#+\s*", "", linea_stripped).strip()
-                tipo_detectado = self._clasificar_seccion(titulo_candidato)
+            if not self._RE_ES_ENCABEZADO.match(linea_stripped):
+                continue
 
-                if tipo_detectado != TipoSeccion.DESCONOCIDO:
-                    if seccion_actual is not None:
-                        pagina_fin = max(1, int((i / max(len(lineas), 1)) * num_paginas))
-                        secciones.append(SeccionDetectada(
-                            tipo=seccion_actual,
-                            titulo_detectado=titulo_actual,
-                            pagina_inicio=pagina_inicio_actual,
-                            pagina_fin=pagina_fin,
-                            tiene_referencias=(seccion_actual == TipoSeccion.REFERENCIAS),
-                        ))
+            titulo_candidato = self._normalizar_titulo(linea_stripped)
+            tipo_detectado = self._clasificar_seccion(titulo_candidato)
 
-                    seccion_actual = tipo_detectado
-                    titulo_actual = titulo_candidato
-                    pagina_inicio_actual = max(
-                        1, int((i / max(len(lineas), 1)) * num_paginas) + 1
-                    )
+            if tipo_detectado != TipoSeccion.DESCONOCIDO:
+                if seccion_actual is not None:
+                    pagina_fin = max(1, int((i / max(len(lineas), 1)) * num_paginas))
+                    secciones.append(SeccionDetectada(
+                        tipo=seccion_actual,
+                        titulo_detectado=titulo_actual,
+                        pagina_inicio=pagina_inicio_actual,
+                        pagina_fin=pagina_fin,
+                        tiene_referencias=(seccion_actual == TipoSeccion.REFERENCIAS),
+                    ))
+
+                seccion_actual = tipo_detectado
+                titulo_actual = titulo_candidato
+                pagina_inicio_actual = max(
+                    1, int((i / max(len(lineas), 1)) * num_paginas) + 1
+                )
 
         if seccion_actual is not None:
             secciones.append(SeccionDetectada(

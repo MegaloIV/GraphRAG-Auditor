@@ -16,6 +16,8 @@ class LLMService:
 
     def __init__(self):
         self._cliente: Groq | None = None
+        # Si el modelo rechaza `temperature`, se deja de enviar (default del modelo).
+        self._usar_temperature = True
 
     @property
     def cliente(self) -> Groq:
@@ -27,6 +29,19 @@ class LLMService:
                 )
             self._cliente = Groq(api_key=settings.groq_api_key)
         return self._cliente
+
+    def _crear_completion(self, messages: list[dict]):
+        """Llama al API con temperature=0.0; si el modelo lo rechaza, reintenta sin él."""
+        kwargs = {"model": settings.groq_model, "messages": messages}
+        if self._usar_temperature:
+            try:
+                return self.cliente.chat.completions.create(**kwargs, temperature=0.0)
+            except Exception as e:
+                if "temperature" not in str(e).lower():
+                    raise
+                self._usar_temperature = False
+                logger.info("temperature_no_soportada", modelo=settings.groq_model)
+        return self.cliente.chat.completions.create(**kwargs)
 
     def completar(
         self,
@@ -43,13 +58,11 @@ class LLMService:
         for intento in range(1, intentos + 1):
             try:
                 inicio = time.perf_counter()
-                response = self.cliente.chat.completions.create(
-                    model=settings.groq_model,
-                    messages=[
+                response = self._crear_completion(
+                    [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
-                    ],
-                    temperature=0.0,
+                    ]
                 )
                 elapsed = time.perf_counter() - inicio
 

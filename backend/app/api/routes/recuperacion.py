@@ -71,7 +71,7 @@ def _nodo_to_schema(n: NodoGrafo) -> NodoGrafoSchema:
 async def estado_motor(documento_id: str):
     """
     Indica si el motor de búsqueda semántica está listo para auditar
-    el documento: verifica chunks indexados en ChromaDB y citas
+    el documento: verifica chunks indexados en Supabase/pgvector y citas
     vinculadas a referencias en Neo4j.
     """
     try:
@@ -148,7 +148,7 @@ async def consultar_texto_libre(documento_id: str, body: ConsultaLibreRequest):
 async def consultar_cita(documento_id: str, cita_id: str):
     """
     Recupera la evidencia completa para una cita específica:
-    - Fragmento del paper más similar (ChromaDB)
+    - Fragmento del paper más similar (Supabase/pgvector)
     - Nodos del grafo vinculados: referencia, autores (Neo4j)
     - Score de similitud semántica
 
