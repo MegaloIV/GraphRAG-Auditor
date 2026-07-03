@@ -437,6 +437,11 @@ table.tabla { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .chip button:hover { color: var(--refutes); }
 
 /* ── Responsive (D11) ── */
+
+/* Nunca permitir scroll horizontal de la página completa */
+html, body { max-width: 100%; overflow-x: hidden; }
+img, canvas, svg, video { max-width: 100%; height: auto; }
+
 @media (max-width: 960px) {
   .workspace { flex-direction: column; }
   .riel {
@@ -449,8 +454,24 @@ table.tabla { width: 100%; border-collapse: collapse; font-size: 13.5px; }
   }
   .riel-fase { width: auto; white-space: nowrap; }
   .revision-grid { grid-template-columns: 1fr; }
-  .panel-pdf { position: static; height: 60vh; }
+  .panel-pdf { position: static; height: 60vh; padding: 8px; }
   .panel-cartillas { max-height: none; }
   .contenido-fase { padding: 18px 14px; }
   .topbar-doc { display: none; }
+}
+
+/* Pantallas angostas (móvil) */
+@media (max-width: 700px) {
+  .oculta-movil { display: none !important; }
+  .topbar { gap: 8px; padding: 10px 12px; }
+  .topbar-marca { font-size: 15px; }
+  .contenido-fase { padding: 14px 10px; }
+  .grid-metricas { grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 10px; }
+  .tarjeta-metrica { padding: 12px 14px; }
+  .tarjeta-metrica .valor { font-size: 24px; }
+  .pestanas { flex-wrap: wrap; row-gap: 6px; }
+  .btn-grande { padding: 11px 18px; font-size: 15px; width: 100%; justify-content: center; }
+  .cartilla { padding: 12px; }
+  .estado-centro { padding: 36px 12px; }
+  .dropzone { padding: 36px 14px; }
 }

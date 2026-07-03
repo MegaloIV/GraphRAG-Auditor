@@ -27,7 +27,7 @@ function FilaReferencia({ referencia, marcada, onMarcar, onSubirPaper, onQuitarP
   const sinDoi = !referencia.doi
 
   return (
-    <div className="tarjeta" style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px' }}>
+    <div className="tarjeta" style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', flexWrap: 'wrap' }}>
       <input
         type="checkbox"
         checked={marcada}
@@ -36,7 +36,7 @@ function FilaReferencia({ referencia, marcada, onMarcar, onSubirPaper, onQuitarP
         onChange={(e) => onMarcar(referencia.referencia_id, e.target.checked)}
         style={{ width: 16, height: 16 }}
       />
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ flex: 1, minWidth: 200 }}>
         <strong>{formatearRef(referencia)}</strong>
         <div style={{ fontSize: 13, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
           {referencia.titulo}

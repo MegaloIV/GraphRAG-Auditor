@@ -7,7 +7,7 @@ import { ACCENTS, cambiarAccent } from '../store/accentStore'
 
 function SelectorAccent() {
   return (
-    <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+    <div className="oculta-movil" style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
       {ACCENTS.map((a) => (
         <button
           key={a.valor}
@@ -53,7 +53,9 @@ export default function TopBar({ nombreDocumento }) {
 
       <span className="salud" title="Estado de la conexión con el servidor">
         <span className={`salud-punto ${salud === 'verificando' ? '' : salud}`} />
-        {salud === 'ok' ? 'En línea' : salud === 'mal' ? 'Sin conexión' : 'Conectando…'}
+        <span className="oculta-movil">
+          {salud === 'ok' ? 'En línea' : salud === 'mal' ? 'Sin conexión' : 'Conectando…'}
+        </span>
       </span>
 
       <SelectorAccent />
@@ -66,9 +68,9 @@ export default function TopBar({ nombreDocumento }) {
         {tema === 'claro' ? <Moon size={16} /> : <Sun size={16} />}
       </button>
 
-      <button className="btn btn-contorno" onClick={() => navigate('/')}>
+      <button className="btn btn-contorno" title="Nuevo documento" onClick={() => navigate('/')}>
         <FilePlus2 size={15} />
-        Nuevo documento
+        <span className="oculta-movil">Nuevo documento</span>
       </button>
     </header>
   )
