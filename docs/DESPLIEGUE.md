@@ -65,6 +65,12 @@ Flags que **no** son opcionales y por qué:
 
 > `env.yaml` contiene secretos: **no lo commitees** (añádelo a `.gitignore`). La alternativa limpia es Secret Manager: `--set-secrets OPENAI_API_KEY=openai-key:latest,...`
 
+**`backend/.gcloudignore`** controla qué se sube a Cloud Build con `--source`. Sin él, gcloud sube el directorio completo: el `.env` con secretos acabaría almacenado en el bucket de código fuente de GCS y la `.venv` (cientos de MB) viajaría en cada despliegue. El repo ya lo incluye; para auditar qué se subiría exactamente:
+
+```bash
+gcloud meta list-files-for-upload backend
+```
+
 ### CORS
 
 Tras el primer despliegue, añade el dominio del frontend a `allow_origins` en `backend/app/main.py` y redespliega. (Localhost y el dominio de Vercel actual ya están.)

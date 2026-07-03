@@ -1,0 +1,29 @@
+# Qué NO subir a Cloud Build con `gcloud run deploy --source backend`.
+# Sin este archivo, gcloud sube TODO el directorio: incluido el .env con
+# secretos (quedaría almacenado en el bucket de código fuente de GCS) y la
+# .venv completa (cientos de MB por despliegue).
+
+# Secretos y configuración local
+.env
+.env.*
+
+# Entornos virtuales y caches de Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Tests y scripts de desarrollo (no participan del build)
+tests/
+test_*.py
+debug_pdf_to_md.py
+
+# Control de versiones y datos locales
+.git/
+.gitignore
+data/
+
+# El propio ignore de gcloud no hace falta en el build
+.gcloudignore
