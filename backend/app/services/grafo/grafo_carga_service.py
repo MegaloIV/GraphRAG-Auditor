@@ -340,6 +340,31 @@ class GrafoCargaService:
             session.run("MATCH (c:Cita {id: $cita_id}) DETACH DELETE c", cita_id=cita_id)
         logger.info("cita_eliminada", cita_id=cita_id)
 
+    def eliminar_citas(self, documento_id: str, cita_ids: list[str]) -> int:
+        """
+        Elimina varias citas en una sola operación. Acotado al documento:
+        ids que no pertenezcan a él se ignoran. Retorna cuántas se eliminaron.
+        """
+        if not cita_ids:
+            return 0
+        query = """
+        MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
+        WHERE c.id IN $cita_ids
+        WITH collect(c) AS nodos
+        FOREACH (n IN nodos | DETACH DELETE n)
+        RETURN size(nodos) AS eliminadas
+        """
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            rec = session.run(query, doc_id=documento_id, cita_ids=cita_ids).single()
+            eliminadas = rec["eliminadas"] if rec else 0
+        logger.info(
+            "citas_eliminadas_lote",
+            doc_id=documento_id,
+            solicitadas=len(cita_ids),
+            eliminadas=eliminadas,
+        )
+        return eliminadas
+
     def _leer_referencia(self, session, referencia_id: str) -> ReferenciaAPA | None:
         q = """
         MATCH (r:Referencia {id: $ref_id})
