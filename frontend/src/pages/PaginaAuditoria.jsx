@@ -30,17 +30,17 @@ function FilaVeredicto({ v }) {
             </p>
           )}
           <p><b>Justificación:</b> {v.justificacion}</p>
-          {v.fragmento_evidencia && (
+          {(v.fragmento_evidencia_es || v.fragmento_evidencia) && (
             <blockquote
               className="texto-doc"
               style={{ margin: 0, padding: '10px 14px', background: 'var(--bg-sunken)', borderLeft: '3px solid var(--accent)', borderRadius: 'var(--radius-sm)' }}
+              title={v.fragmento_evidencia_es ? 'Traducción al español; el original se conserva en el sistema.' : undefined}
             >
-              “{v.fragmento_evidencia}”
-              {v.pagina_paper != null && (
-                <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-faint)' }}>
-                  {' '}— paper, pág. {v.pagina_paper}
-                </span>
-              )}
+              “{v.fragmento_evidencia_es || v.fragmento_evidencia}”
+              <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-faint)' }}>
+                {v.pagina_paper != null && <>{' '}— paper, pág. {v.pagina_paper}</>}
+                {v.fragmento_evidencia_es && <>{' '}· traducido</>}
+              </span>
             </blockquote>
           )}
           {v.titulo_referencia && (
