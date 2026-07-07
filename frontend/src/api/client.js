@@ -106,6 +106,8 @@ export const grafoAPI = {
   crearCita: (documentoId, data) => client.post(`/grafo/${documentoId}/citas`, data),
   eliminarCita: (documentoId, citaId) =>
     client.delete(`/grafo/${documentoId}/citas/${citaId}`),
+  eliminarCitasLote: (documentoId, citaIds) =>
+    client.post(`/grafo/${documentoId}/citas/eliminar-lote`, { cita_ids: citaIds }),
 
   // CRUD de revisión humana — referencias
   actualizarReferencia: (documentoId, refId, data) =>
