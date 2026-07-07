@@ -443,7 +443,11 @@ def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
         referencias = extraccion_service.extraer_referencias(texto_md)
 
         actualizar(55, "Detectando citas en el texto...")
-        citas = extraccion_service.extraer_citas(texto_md, num_paginas)
+        # El TOC (índice) acota la búsqueda a las secciones citables:
+        # metodología, resultados y conclusiones se descartan.
+        citas = extraccion_service.extraer_citas(
+            texto_md, num_paginas, toc=pdf_service.obtener_toc(ruta_pdf)
+        )
 
         actualizar(70, "Construyendo grafo de conocimiento...")
         grafo_carga_service.cargar_documento(documento_id, ruta_pdf.name)
