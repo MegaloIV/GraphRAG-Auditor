@@ -128,7 +128,9 @@ class VerificacionService:
         texto_disponible = resultado_crossref.abstract if resultado_crossref.encontrado else None
         nivel_confianza = "abstract" if texto_disponible else None
 
-        if embedding_service.paper_ya_indexado(doi):
+        # Solo se salta la descarga si el índice usa el chunking actual;
+        # papers con chunking viejo (páginas enteras) se re-indexan.
+        if embedding_service.indexado_y_actualizado(doi):
             logger.info("paper_ya_en_cache", doi=doi)
             return {
                 "encontrada": True,

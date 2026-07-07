@@ -121,6 +121,8 @@ async def ver_veredictos(documento_id: str):
       c.veredicto     AS veredicto,
       c.justificacion AS justificacion,
       c.pagina_paper  AS pagina_paper,
+      c.fragmento_evidencia    AS fragmento_evidencia,
+      c.fragmento_evidencia_es AS fragmento_evidencia_es,
       c.faithfulness      AS faithfulness,
       c.answer_relevancy  AS answer_relevancy,
       c.context_precision AS context_precision,
@@ -159,6 +161,8 @@ async def ver_veredictos(documento_id: str):
                 pagina=r["pagina"] or 0,
                 veredicto=tipo,
                 justificacion=r["justificacion"] or "",
+                fragmento_evidencia=r.get("fragmento_evidencia") or "",
+                fragmento_evidencia_es=r.get("fragmento_evidencia_es") or "",
                 referencia_id=r["ref_id"],
                 titulo_referencia=r["ref_titulo_oficial"] or r["ref_titulo"],
                 anio_referencia=r["ref_anio"],
@@ -424,6 +428,7 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
       c.veredicto          AS veredicto,
       c.justificacion      AS justificacion,
       c.fragmento_evidencia AS fragmento_paper,
+      c.fragmento_evidencia_es AS fragmento_paper_es,
       c.pagina_paper       AS pagina_paper,
       c.faithfulness       AS faithfulness,
       c.answer_relevancy   AS answer_relevancy,
@@ -593,7 +598,7 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
             ws_citas.column_dimensions[c.column_letter].width = ancho
         ws_citas.row_dimensions[1].height = 30
 
-        from app.services.recuperacion.recuperacion_service import limpiar_fragmento
+        from app.core.texto import limpiar_fragmento
 
         for fila_idx, reg in enumerate(citas_raw, start=2):
             titulo_paper = reg["titulo_oficial"] or reg["titulo_referencia"] or ""
@@ -610,7 +615,8 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
                 (limpiar_fragmento(reg["fragmento_oracion"] or ""), wrap),
                 (VEREDICTO_LEGIBLE.get(veredicto, "Sin auditar"), center),
                 (reg["justificacion"] or "", wrap),
-                (limpiar_fragmento(reg["fragmento_paper"] or ""), wrap),
+                # Se muestra la traducción al español si existe; si no, el original.
+                (limpiar_fragmento(reg["fragmento_paper_es"] or reg["fragmento_paper"] or ""), wrap),
                 (fuente, wrap),
                 (reg["pagina_tesis"] or "", center),
                 (reg["pagina_paper"] or "", center),

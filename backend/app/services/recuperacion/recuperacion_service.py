@@ -26,22 +26,19 @@ settings = get_settings()
 logger = structlog.get_logger(__name__)
 
 
-# ── Limpieza de fragmentos ────────────────────────────────────────────────────
-# El markdown extraído de los PDFs arrastra ruido (negritas, encabezados,
-# separadores, saltos de línea del layout original). Se limpia en un solo
-# punto: lo que ve el juez LLM es lo mismo que ven las cartillas y el Excel.
-
-_RE_RUIDO_MD = re.compile(r"\*{1,2}|`+|^#{1,6}\s*", re.MULTILINE)
-_RE_SEPARADOR = re.compile(r"^[\s_\-—=]{3,}$", re.MULTILINE)
-_RE_SALTOS = re.compile(r"\s*\n\s*")
+from app.core.texto import limpiar_fragmento  # noqa: E402 — un solo punto de limpieza
 
 
-def limpiar_fragmento(texto: str) -> str:
-    """Quita marcado markdown y colapsa saltos de línea en texto corrido."""
-    texto = _RE_RUIDO_MD.sub("", texto or "")
-    texto = _RE_SEPARADOR.sub(" ", texto)
-    texto = _RE_SALTOS.sub(" ", texto)
-    return re.sub(r"\s{2,}", " ", texto).strip()
+def _unir_sin_solape(a: str, b: str, max_solape: int = 300) -> str:
+    """
+    Une dos chunks contiguos eliminando el texto solapado (los sub-chunks se
+    indexan con ~150 chars de solapamiento para no cortar ideas a la mitad).
+    """
+    tope = min(max_solape, len(a), len(b))
+    for k in range(tope, 20, -1):
+        if a.endswith(b[:k]):
+            return a + b[k:]
+    return a + " " + b
 
 
 # Anclas léxicas: cifras con decimales y porcentajes de la afirmación
@@ -444,7 +441,10 @@ class RecuperacionService:
             doi_normalizado, idx - 1, idx + 1
         )
         if len(vecinos) > 1:
-            pasaje = " ".join(limpiar_fragmento(v["contenido"]) for v in vecinos)
+            pasaje = ""
+            for v in vecinos:
+                limpio = limpiar_fragmento(v["contenido"])
+                pasaje = _unir_sin_solape(pasaje, limpio) if pasaje else limpio
             indices_ventana = {v["chunk_index"] for v in vecinos}
             logger.debug(
                 "ventana_contexto_cosida",

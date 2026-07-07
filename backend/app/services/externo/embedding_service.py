@@ -16,6 +16,7 @@ from typing import Optional
 from openai import OpenAI
 
 from app.core.config import get_settings
+from app.core.texto import limpiar_fragmento
 from app.services.vectorstore.supabase_service import supabase_vector_service
 
 logger = structlog.get_logger(__name__)
@@ -50,6 +51,17 @@ _RE_SECTION_FINAL = re.compile(
 )
 
 MAX_CHUNK_CHARS = 2500
+
+# Sub-chunks: una página entera (~2500-4000 chars) mezcla demasiados temas y
+# diluye el embedding — la oración relevante se pierde en el promedio. Cada
+# página se subdivide en bloques de ~1100 chars cortados en fronteras de
+# oración, con solapamiento para que ninguna idea quede partida en dos:
+# toda oración cercana a un corte aparece completa en al menos un bloque
+# (y la ventana ±1 de la recuperación recose los vecinos de todos modos).
+SUB_CHUNK_CHARS = 1100
+SUB_CHUNK_SOLAPE = 150
+
+_RE_FRONTERA_ORACION = re.compile(r"(?<=[.!?])\s+")
 
 _RE_URL = re.compile(r'https?://\S+', re.IGNORECASE)
 _RE_EMAIL = re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}')
@@ -198,6 +210,59 @@ def _es_chunk_portada(chunk: str, chunk_index: int, doi: str) -> bool:
     return False
 
 
+def _es_chunk_ruido(chunk: str) -> bool:
+    """
+    Tablas, figuras y listas numéricas convertidas a texto: la mayoría de sus
+    caracteres no son letras. Ese "texto" produce embeddings basura que luego
+    aparecen como fragmentos recuperados ilegibles.
+    """
+    compacto = re.sub(r"\s", "", chunk)
+    if not compacto:
+        return True
+    letras = sum(c.isalpha() for c in compacto)
+    return letras / len(compacto) < 0.55
+
+
+def _subdividir(texto: str, max_chars: int = SUB_CHUNK_CHARS, solape: int = SUB_CHUNK_SOLAPE) -> list[str]:
+    """
+    Divide el texto de una página en bloques de ~max_chars cortando en la
+    última frontera de oración de la ventana (fallback: salto de línea,
+    espacio, corte duro). Bloques consecutivos se solapan ~solape chars.
+    """
+    texto = texto.strip()
+    if not texto:
+        return []
+    if len(texto) <= int(max_chars * 1.35):
+        return [texto]
+
+    partes: list[str] = []
+    inicio = 0
+    n = len(texto)
+    while inicio < n:
+        fin = min(inicio + max_chars, n)
+        if fin < n:
+            ventana = texto[inicio:fin]
+            corte = None
+            for m in _RE_FRONTERA_ORACION.finditer(ventana):
+                if m.end() >= max_chars // 2:
+                    corte = m.end()
+            if corte is None:
+                salto = ventana.rfind("\n")
+                corte = salto if salto >= max_chars // 2 else None
+            if corte is None:
+                espacio = ventana.rfind(" ")
+                corte = espacio if espacio >= max_chars // 2 else None
+            if corte is not None:
+                fin = inicio + corte
+        parte = texto[inicio:fin].strip()
+        if parte:
+            partes.append(parte)
+        if fin >= n:
+            break
+        inicio = max(fin - solape, inicio + 1)
+    return partes
+
+
 def _dividir_en_chunks(texto: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
     """
     Divide texto en chunks por marcadores de página o por tamaño.
@@ -318,42 +383,61 @@ class EmbeddingService:
             doi_normalizado = doi.replace("/", "_").replace(".", "_")
 
             texto_limpio = _truncar_referencias_paper(texto, doi=doi)
-            chunks_raw = _dividir_en_chunks(texto_limpio)
-            chunks = [
-                c for idx, c in enumerate(chunks_raw)
-                if not _es_chunk_portada(c, idx, doi) and not _es_chunk_basura(c)
-            ]
-            descartados = len(chunks_raw) - len(chunks)
+
+            # Paso 2a: páginas (conserva el número de página real del PDF).
+            paginas = _dividir_en_chunks(texto_limpio)
+
+            # Paso 2b: sub-chunks de ~1100 chars con solapamiento, para que el
+            # embedding represente una idea y no el promedio de una página.
+            candidatos: list[tuple[int, str]] = []
+            for num_pagina, texto_pagina in enumerate(paginas, start=1):
+                for parte in _subdividir(texto_pagina):
+                    candidatos.append((num_pagina, parte))
+
+            # Paso 3: filtros de ruido por sub-chunk (portada, boilerplate,
+            # tablas/figuras). A esta granularidad una página mitad tabla /
+            # mitad texto salva su texto y descarta la tabla.
+            chunks: list[tuple[int, str]] = []
+            for idx, (num_pagina, parte) in enumerate(candidatos):
+                if _es_chunk_portada(parte, idx, doi) or _es_chunk_basura(parte) or _es_chunk_ruido(parte):
+                    continue
+                chunks.append((num_pagina, limpiar_fragmento(parte)))
+            descartados = len(candidatos) - len(chunks)
 
             if descartados:
                 logger.info(
                     "chunks_basura_descartados",
                     doi=doi,
                     descartados=descartados,
-                    total_raw=len(chunks_raw),
+                    total_raw=len(candidatos),
                 )
 
             if not chunks:
                 logger.warning("indexar_paper_sin_chunks_utiles", doi=doi)
                 return False
 
-            logger.info("paper_dividido_en_chunks", doi=doi, total_chunks=len(chunks))
+            logger.info(
+                "paper_dividido_en_chunks",
+                doi=doi,
+                paginas=len(paginas),
+                total_chunks=len(chunks),
+            )
 
             # Generar embeddings (batch a la API) y construir registros para Supabase
-            embeddings = self._embed(chunks)
+            embeddings = self._embed([contenido for _, contenido in chunks])
             registros = []
-            for idx, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            for idx, ((num_pagina, contenido), embedding) in enumerate(zip(chunks, embeddings)):
                 registros.append({
                     "id":              f"{doi_normalizado}_chunk_{idx}",
                     "doi":             doi,
                     "doi_normalizado": doi_normalizado,
                     "titulo":          metadata.get("titulo"),
                     "anio":            metadata.get("anio"),
-                    "pagina":          idx + 1,
+                    "pagina":          num_pagina,
                     "chunk_index":     idx,
                     "nivel_confianza": metadata.get("nivel_confianza"),
                     "referencia_id":   metadata.get("referencia_id"),
-                    "contenido":       chunk,
+                    "contenido":       contenido,
                     "embedding":       embedding,
                 })
 
@@ -430,6 +514,18 @@ class EmbeddingService:
         """Verifica si un paper ya fue indexado en Supabase."""
         doi_normalizado = doi.replace("/", "_").replace(".", "_")
         return supabase_vector_service.paper_ya_indexado(doi_normalizado)
+
+    def indexado_y_actualizado(self, doi: str) -> bool:
+        """
+        True solo si el paper está indexado CON el chunking actual. Los papers
+        con chunking viejo (páginas enteras) devuelven False para que la
+        verificación los re-descargue y re-indexe con sub-chunks.
+        """
+        doi_normalizado = doi.replace("/", "_").replace(".", "_")
+        return (
+            supabase_vector_service.paper_ya_indexado(doi_normalizado)
+            and supabase_vector_service.chunks_son_actuales(doi_normalizado)
+        )
 
     def total_papers_indexados(self) -> int:
         """Retorna el total de chunks en Supabase."""

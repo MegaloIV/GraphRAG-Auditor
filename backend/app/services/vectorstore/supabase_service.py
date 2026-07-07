@@ -135,6 +135,25 @@ class SupabaseVectorService:
             logger.error("error_chunks_por_rango", doi_normalizado=doi_normalizado, error=str(e))
             return []
 
+    def chunks_son_actuales(self, doi_normalizado: str) -> bool:
+        """
+        True si los chunks del DOI usan el chunking nuevo (sub-bloques de
+        ~1100 chars). Los papers indexados con el chunking viejo (páginas
+        enteras) tienen chunks mucho más largos y conviene re-indexarlos.
+        """
+        try:
+            conn = self._conectar()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(MAX(LENGTH(contenido)), 0) FROM papers_chunks WHERE doi_normalizado = %s",
+                    (doi_normalizado,),
+                )
+                maximo = cur.fetchone()[0]
+                return 0 < maximo <= 1600
+        except Exception as e:
+            logger.error("error_chunks_son_actuales", doi_normalizado=doi_normalizado, error=str(e))
+            return True  # ante la duda, no forzar re-descarga del paper
+
     def buscar_por_termino(
         self,
         doi_normalizado: str,
