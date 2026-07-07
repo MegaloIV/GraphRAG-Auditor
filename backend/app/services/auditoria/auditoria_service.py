@@ -88,13 +88,20 @@ RETURN DISTINCT r.id AS ref_id
 
 _Q_GUARDAR_VEREDICTO = """
 MATCH (c:Cita {id: $cita_id})
-SET c.veredicto           = $veredicto,
-    c.justificacion       = $justificacion,
-    c.auditado_en         = datetime(),
-    c.pagina_paper        = $pagina_paper,
-    c.fragmento_evidencia = $fragmento_evidencia,
-    c.similitud           = $similitud
+SET c.veredicto              = $veredicto,
+    c.justificacion          = $justificacion,
+    c.auditado_en            = datetime(),
+    c.pagina_paper           = $pagina_paper,
+    c.fragmento_evidencia    = $fragmento_evidencia,
+    c.fragmento_evidencia_es = $fragmento_evidencia_es,
+    c.similitud              = $similitud
 """
+
+_SYSTEM_TRADUCCION_EVIDENCIA = """Traduce al español académico el siguiente fragmento de un paper.
+Conserva EXACTAMENTE las cifras, porcentajes, nombres propios y siglas.
+Si el fragmento contiene varios pasajes separados por "---", consérvalos separados igual.
+Si el texto ya está en español, devuélvelo sin cambios.
+Responde ÚNICAMENTE con la traducción, sin comentarios."""
 
 
 class AuditoriaService:
@@ -314,6 +321,7 @@ class AuditoriaService:
             veredicto=veredicto_tipo,
             justificacion=justificacion,
             fragmento_evidencia=resultado.fragmento_relevante,
+            fragmento_evidencia_es=self._traducir_evidencia(resultado.fragmento_relevante),
             similitud=resultado.similitud,
             referencia_id=ref_id,
             titulo_referencia=ref_titulo,
@@ -325,6 +333,25 @@ class AuditoriaService:
         )
         self._persistir_veredicto(veredicto, pagina_paper=pagina_paper)
         return veredicto
+
+    @staticmethod
+    def _traducir_evidencia(fragmento: str) -> str:
+        """
+        Traduce el fragmento de evidencia al español para mostrarlo en las
+        cartillas y el Excel. El original en inglés se persiste igual (juez,
+        trazabilidad y módulo de coherencia usan el original). Si la
+        traducción falla, se devuelve vacío y la UI cae al original.
+        """
+        if not fragmento or not fragmento.strip():
+            return ""
+        try:
+            return llm_service.completar(
+                system_prompt=_SYSTEM_TRADUCCION_EVIDENCIA,
+                user_prompt=fragmento[:4000],
+            ).strip()
+        except Exception as e:
+            logger.warning("traduccion_evidencia_fallida", error=str(e))
+            return ""
 
     def _llamar_llm(self, texto_cita: str, fragmento_oracion: str, fragmento: str) -> tuple[VeredictoTipo, str]:
         """
@@ -396,6 +423,7 @@ class AuditoriaService:
                     justificacion=veredicto.justificacion,
                     pagina_paper=pagina_paper,
                     fragmento_evidencia=veredicto.fragmento_evidencia or "",
+                    fragmento_evidencia_es=veredicto.fragmento_evidencia_es or "",
                     similitud=float(veredicto.similitud or 0.0),
                 )
         except Exception as e:

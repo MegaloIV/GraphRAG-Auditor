@@ -18,6 +18,9 @@ class VeredictoAuditoria(BaseModel):
     veredicto: VeredictoTipo
     justificacion: str
     fragmento_evidencia: str = ""
+    # Traducción al español del fragmento (para mostrar; el original se
+    # conserva para trazabilidad y para el módulo de coherencia).
+    fragmento_evidencia_es: str = ""
     similitud: float = 0.0
     referencia_id: Optional[str] = None
     titulo_referencia: Optional[str] = None
