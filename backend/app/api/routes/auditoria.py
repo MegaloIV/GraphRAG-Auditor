@@ -593,16 +593,25 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
             ws_citas.column_dimensions[c.column_letter].width = ancho
         ws_citas.row_dimensions[1].height = 30
 
+        from app.services.recuperacion.recuperacion_service import limpiar_fragmento
+
         for fila_idx, reg in enumerate(citas_raw, start=2):
             titulo_paper = reg["titulo_oficial"] or reg["titulo_referencia"] or ""
+            # Fuente legible: "Autor1; Autor2 (año). Título" — identifica el
+            # paper sin tener que cruzar con la hoja de referencias.
+            autores = [a for a in (reg["autores"] or []) if a]
+            fuente = titulo_paper
+            if autores:
+                lista_autores = "; ".join(autores[:3]) + (" et al." if len(autores) > 3 else "")
+                fuente = f"{lista_autores} ({reg['anio_referencia'] or 's.f.'}). {titulo_paper}"
             veredicto = reg["veredicto"] or ""
             valores = [
                 (reg["texto_cita"] or "", wrap),
-                (reg["fragmento_oracion"] or "", wrap),
+                (limpiar_fragmento(reg["fragmento_oracion"] or ""), wrap),
                 (VEREDICTO_LEGIBLE.get(veredicto, "Sin auditar"), center),
                 (reg["justificacion"] or "", wrap),
-                (reg["fragmento_paper"] or "", wrap),
-                (titulo_paper, wrap),
+                (limpiar_fragmento(reg["fragmento_paper"] or ""), wrap),
+                (fuente, wrap),
                 (reg["pagina_tesis"] or "", center),
                 (reg["pagina_paper"] or "", center),
             ]
