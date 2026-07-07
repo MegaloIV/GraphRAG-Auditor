@@ -49,7 +49,14 @@ JUSTIFICATION: <una oración que explique el veredicto>
 Criterios:
 - SUPPORTS: el fragmento contiene evidencia directa que respalda la afirmación del tesista. La información citada es fiel a la fuente.
 - REFUTES: el fragmento contradice, niega o es incompatible con la afirmación del tesista. Hay distorsión, exageración o tergiversación de la fuente.
-- NO_INFO: el fragmento no contiene información suficiente para determinar si la afirmación es verdadera o falsa. Incluye citas fabricadas, fuentes inexistentes o fragmentos sin relación con la afirmación."""
+- NO_INFO: el fragmento no contiene información suficiente para determinar si la afirmación es verdadera o falsa. Incluye citas fabricadas, fuentes inexistentes o fragmentos sin relación con la afirmación.
+
+Reglas estrictas de verificación (obligatorias):
+- La dirección importa: verifica que LO QUE AFIRMA EL TESISTA esté contenido en el fragmento. No al revés, y no basta con que "hablen de lo mismo".
+- La coincidencia temática NO es evidencia. Si el fragmento trata el mismo tema pero no contiene la afirmación específica del tesista → NO_INFO. Nunca justifiques un SUPPORTS con frases como "coincide con la idea de".
+- Si la afirmación incluye cifras, porcentajes o comparaciones concretas ("6.7 veces más rápido", "80% de precisión"), el fragmento debe contener esa cifra o una equivalente inequívoca para dar SUPPORTS.
+- No completes con conocimiento propio ni des el beneficio de la duda: solo cuenta lo que está escrito en el fragmento.
+- El FRAGMENTO DEL PAPER puede incluir varios pasajes separados por "---": la evidencia puede estar en cualquiera de ellos; evalúa todos antes de decidir."""
 
 
 _Q_CITAS_DOCUMENTO = """
