@@ -11,6 +11,8 @@ export default function CartillaCita({
   referencias,
   localizada,
   seleccionada,
+  marcadaLote = false,
+  onMarcarLote,
   onEnfocar,
   onGuardar,
   onEliminar,
@@ -69,6 +71,16 @@ export default function CartillaCita({
       onClick={() => onEnfocar(cita.cita_id)}
     >
       <div className="cartilla-cabecera">
+        {onMarcarLote && (
+          <input
+            type="checkbox"
+            checked={marcadaLote}
+            onClick={(e) => e.stopPropagation()}
+            onChange={() => onMarcarLote(cita.cita_id)}
+            title="Seleccionar para eliminar en lote"
+            style={{ cursor: 'pointer' }}
+          />
+        )}
         <span className="badge badge-accent">
           {cita.tipo === 'parentetica' ? 'Parentética' : 'Narrativa'}
         </span>

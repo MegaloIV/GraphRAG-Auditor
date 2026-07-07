@@ -14,6 +14,7 @@ from app.models.grafo import (
     TipoCita,
     ActualizarCitaRequest,
     CrearCitaRequest,
+    EliminarCitasRequest,
     ActualizarReferenciaRequest,
     CrearReferenciaRequest,
     UbicacionesCitasResponse,
@@ -381,6 +382,20 @@ async def eliminar_cita(documento_id: str, cita_id: str):
     grafo_carga_service.eliminar_cita(cita_id)
     localizacion_service.invalidar_cache(documento_id)
     return {"eliminado": True, "cita_id": cita_id}
+
+
+@router.post(
+    "/{documento_id}/citas/eliminar-lote",
+    summary="Eliminar varias citas a la vez durante la revisión",
+)
+async def eliminar_citas_lote(documento_id: str, datos: EliminarCitasRequest):
+    eliminadas = grafo_carga_service.eliminar_citas(documento_id, datos.cita_ids)
+    localizacion_service.invalidar_cache(documento_id)
+    return {
+        "eliminadas": eliminadas,
+        "solicitadas": len(datos.cita_ids),
+        "cita_ids": datos.cita_ids,
+    }
 
 
 # ── CRUD de revisión humana: referencias ──────────────────────────────────────

@@ -68,6 +68,11 @@ class CrearCitaRequest(BaseModel):
     fragmento_oracion: str
 
 
+class EliminarCitasRequest(BaseModel):
+    """Eliminación en lote durante la revisión humana."""
+    cita_ids: list[str]
+
+
 class ActualizarReferenciaRequest(BaseModel):
     autores: Optional[list[str]] = None
     anio: Optional[int] = None

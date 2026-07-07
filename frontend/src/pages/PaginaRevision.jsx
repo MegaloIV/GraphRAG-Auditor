@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
-import { Plus, RefreshCcw, CheckCheck, BookMarked } from 'lucide-react'
+import { Plus, RefreshCcw, CheckCheck, BookMarked, Trash2 } from 'lucide-react'
 import VisorPDF from '../components/VisorPDF'
 import CartillaCita from '../components/CartillaCita'
 import CartillaReferencia from '../components/CartillaReferencia'
@@ -23,6 +23,8 @@ export default function PaginaRevision() {
 
   const [pestana, setPestana] = useState('citas')
   const [soloSinVincular, setSoloSinVincular] = useState(false)
+  const [seleccionLote, setSeleccionLote] = useState(new Set())
+  const [eliminandoLote, setEliminandoLote] = useState(false)
   const [foco, setFoco] = useState(null)
   const [confirmando, setConfirmando] = useState(false)
   const [reVinculando, setReVinculando] = useState(false)
@@ -104,9 +106,43 @@ export default function PaginaRevision() {
     try {
       await grafoAPI.eliminarCita(documentoId, citaId)
       setCitas((prev) => prev.filter((c) => c.cita_id !== citaId))
+      setSeleccionLote((prev) => {
+        const s = new Set(prev)
+        s.delete(citaId)
+        return s
+      })
       cargarUbicaciones()
     } catch (e) {
       setErrorAccion(e)
+    }
+  }
+
+  // ── Eliminación en lote ──
+  const alternarSeleccionLote = useCallback((citaId) => {
+    setSeleccionLote((prev) => {
+      const s = new Set(prev)
+      if (s.has(citaId)) s.delete(citaId)
+      else s.add(citaId)
+      return s
+    })
+  }, [])
+
+  const eliminarSeleccionadas = async () => {
+    const ids = [...seleccionLote]
+    if (!ids.length) return
+    if (!window.confirm(`¿Eliminar ${ids.length} cita(s) seleccionada(s)? Esta acción no se puede deshacer.`)) return
+    setEliminandoLote(true)
+    setErrorAccion(null)
+    try {
+      await grafoAPI.eliminarCitasLote(documentoId, ids)
+      setCitas((prev) => prev.filter((c) => !seleccionLote.has(c.cita_id)))
+      setSeleccionLote(new Set())
+      if (seleccionLote.has(foco)) setFoco(null)
+      cargarUbicaciones()
+    } catch (e) {
+      setErrorAccion(e)
+    } finally {
+      setEliminandoLote(false)
     }
   }
 
@@ -270,7 +306,23 @@ export default function PaginaRevision() {
                   />
                   solo sin vincular
                 </label>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} title="Selecciona todas las citas visibles para eliminarlas en lote">
+                  <input
+                    type="checkbox"
+                    checked={citasVisibles.length > 0 && citasVisibles.every((c) => seleccionLote.has(c.cita_id))}
+                    onChange={(e) =>
+                      setSeleccionLote(e.target.checked ? new Set(citasVisibles.map((c) => c.cita_id)) : new Set())
+                    }
+                  />
+                  seleccionar visibles
+                </label>
                 <span style={{ flex: 1 }} />
+                {seleccionLote.size > 0 && (
+                  <button className="btn btn-peligro" onClick={eliminarSeleccionadas} disabled={eliminandoLote}>
+                    <Trash2 size={14} />
+                    {eliminandoLote ? 'Eliminando…' : `Eliminar (${seleccionLote.size})`}
+                  </button>
+                )}
                 <button className="btn" onClick={crearCita}>
                   <Plus size={14} /> Añadir cita
                 </button>
@@ -287,6 +339,8 @@ export default function PaginaRevision() {
                       referencias={referencias}
                       localizada={localizadaPorId[cita.cita_id] !== false}
                       seleccionada={foco === cita.cita_id}
+                      marcadaLote={seleccionLote.has(cita.cita_id)}
+                      onMarcarLote={alternarSeleccionLote}
                       onEnfocar={setFoco}
                       onGuardar={guardarCita}
                       onEliminar={eliminarCita}
