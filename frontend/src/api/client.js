@@ -155,6 +155,14 @@ export const auditoriaAPI = {
     }),
 }
 
+// ── Coherencia inter-fuentes (post-auditoría) ────────────
+export const coherenciaAPI = {
+  // Construye el análisis: conceptos + juez de relaciones entre papers.
+  analizar: (documentoId) =>
+    client.post(`/coherencia/${documentoId}`, null, { timeout: AUDITORIA_TIMEOUT }),
+  ver: (documentoId) => client.get(`/coherencia/${documentoId}`),
+}
+
 // ── Evaluación vs ground truth experto (admin, separado de RAGAS) ──
 export const evaluacionAPI = {
   evaluar: (documentoId, etiquetas) =>

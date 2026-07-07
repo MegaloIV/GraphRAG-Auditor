@@ -422,6 +422,10 @@ class EmbeddingService:
         """Genera el embedding de un único texto (consulta)."""
         return self._embed([texto])[0]
 
+    def generar_embeddings(self, textos: list[str]) -> list[list[float]]:
+        """Genera embeddings para varios textos, preservando el orden."""
+        return self._embed(textos)
+
     def paper_ya_indexado(self, doi: str) -> bool:
         """Verifica si un paper ya fue indexado en Supabase."""
         doi_normalizado = doi.replace("/", "_").replace(".", "_")

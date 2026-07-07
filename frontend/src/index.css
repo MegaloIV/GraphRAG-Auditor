@@ -253,24 +253,67 @@ textarea.campo { resize: vertical; min-height: 64px; font-family: var(--font-doc
 .salud-punto.ok { background: var(--supports); }
 .salud-punto.mal { background: var(--refutes); }
 
-/* ── Revisión: dos paneles ── */
+/* ── Revisión: workspace de altura fija con dos paneles ──
+   El body no hace scroll (body.workspace-fijo, lo pone PaginaRevision):
+   solo el PDF y la lista de cartillas tienen scroll interno, así el
+   encabezado, las pestañas y el visor quedan siempre a la vista. */
+body.workspace-fijo { overflow: hidden; }
+body.workspace-fijo .workspace {
+  height: calc(100vh - 57px);
+  height: calc(100dvh - 57px);
+  min-height: 0;
+  overflow: hidden;
+}
+body.workspace-fijo .contenido-fase {
+  /* flex: 1 (regla base) llena el hueco tanto en fila como en columna */
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 24px;
+}
+
+.fase-revision {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
 .revision-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 460px;
+  grid-template-rows: minmax(0, 1fr);
   gap: 18px;
-  align-items: start;
+  flex: 1;
+  min-height: 0;
 }
 .panel-pdf {
-  position: sticky;
-  top: 76px;
-  height: calc(100vh - 100px);
+  min-height: 0;
   overflow: auto;
   background: var(--bg-sunken);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 16px;
 }
-.panel-cartillas { display: flex; flex-direction: column; gap: 12px; max-height: calc(100vh - 100px); overflow-y: auto; padding-right: 2px; }
+.panel-derecho {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+.panel-derecho > :not(.panel-cartillas) { flex-shrink: 0; }
+.panel-cartillas {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+}
 
 .pagina-pdf { position: relative; margin: 0 auto 14px; box-shadow: var(--shadow-md); width: fit-content; }
 .overlay-resaltado {
@@ -453,9 +496,12 @@ img, canvas, svg, video { max-width: 100%; height: auto; }
     padding: 8px 12px;
   }
   .riel-fase { width: auto; white-space: nowrap; }
-  .revision-grid { grid-template-columns: 1fr; }
-  .panel-pdf { position: static; height: 60vh; padding: 8px; }
-  .panel-cartillas { max-height: none; }
+  /* Revisión en columna: PDF arriba (45% de la altura), cartillas abajo,
+     cada uno con su scroll interno; el body sigue sin hacer scroll. */
+  .revision-grid { display: flex; flex-direction: column; min-height: 0; }
+  .panel-pdf { flex: 0 0 45%; padding: 8px; }
+  .panel-derecho { flex: 1; min-height: 0; }
+  body.workspace-fijo .contenido-fase { padding: 12px; }
   .contenido-fase { padding: 18px 14px; }
   .topbar-doc { display: none; }
 }

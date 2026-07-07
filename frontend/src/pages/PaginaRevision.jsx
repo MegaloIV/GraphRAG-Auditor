@@ -64,11 +64,33 @@ export default function PaginaRevision() {
   useEffect(() => { cargarTodo() }, [cargarTodo])
   useEffect(() => { cargarUbicaciones() }, [cargarUbicaciones])
 
+  // Workspace de altura fija mientras esta fase está activa: el body no hace
+  // scroll; solo el PDF y la lista de cartillas tienen scroll interno.
+  useEffect(() => {
+    document.body.classList.add('workspace-fijo')
+    return () => document.body.classList.remove('workspace-fijo')
+  }, [])
+
   const localizadaPorId = useMemo(() => {
     const mapa = {}
     for (const u of ubicaciones || []) mapa[u.cita_id] = u.pagina_real != null
     return mapa
   }, [ubicaciones])
+
+  // Orden de lectura: página real en el PDF y posición vertical dentro de la
+  // página; sin ubicación, la página estimada de la extracción.
+  const citasOrdenadas = useMemo(() => {
+    if (!citas) return citas
+    const pos = {}
+    for (const u of ubicaciones || []) {
+      if (u.pagina_real != null) pos[u.cita_id] = [u.pagina_real, u.rects?.[0]?.y0 ?? 0]
+    }
+    return [...citas].sort((a, b) => {
+      const pa = pos[a.cita_id] || [a.pagina || Number.MAX_SAFE_INTEGER, 0]
+      const pb = pos[b.cita_id] || [b.pagina || Number.MAX_SAFE_INTEGER, 0]
+      return pa[0] - pb[0] || pa[1] - pb[1]
+    })
+  }, [citas, ubicaciones])
 
   // ── Acciones sobre citas ──
   const guardarCita = async (citaId, datos) => {
@@ -168,15 +190,17 @@ export default function PaginaRevision() {
   if (!citas || !referencias) return <EstadoCarga mensaje="Cargando citas y referencias…" />
 
   const sinVincular = citas.filter((c) => !c.referencia_id).length
-  const citasVisibles = soloSinVincular ? citas.filter((c) => !c.referencia_id) : citas
+  const citasVisibles = soloSinVincular
+    ? citasOrdenadas.filter((c) => !c.referencia_id)
+    : citasOrdenadas
   const yaConfirmada = estado !== 'revision_pendiente'
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div className="fase-revision">
       <header style={{ display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: 260 }}>
           <h2>Revisa lo que detectamos</h2>
-          <p style={{ color: 'var(--text-secondary)', marginTop: 4, fontSize: 14 }}>
+          <p className="oculta-movil" style={{ color: 'var(--text-secondary)', marginTop: 4, fontSize: 14 }}>
             Corrige las citas y referencias antes de continuar: haz clic en una cartilla
             para ver el punto exacto del PDF donde aparece.
           </p>
@@ -211,7 +235,7 @@ export default function PaginaRevision() {
           />
         </div>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
+        <div className="panel-derecho">
           <div className="pestanas" style={{ alignItems: 'center' }}>
             <button className={`pestana ${pestana === 'citas' ? 'activa' : ''}`} onClick={() => setPestana('citas')}>
               Citas ({citas.length})

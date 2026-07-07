@@ -53,6 +53,42 @@ _RE_ANEXO_NUMERADO = re.compile(r'^Anexo\s+\d+[\.\:]', re.MULTILINE)
 # Sentence boundary: after .!? followed by whitespace and a Spanish/latin uppercase letter.
 _RE_ORACION_FRASE = re.compile(r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])')
 
+# ── Filtrado por índice: secciones donde NO se buscan citas ──────────────────
+# Metodología, resultados y conclusiones/recomendaciones no se auditan para
+# citas. La sección de referencias solo alimenta extraer_referencias y ya se
+# excluye aparte; los anexos se truncan antes.
+_RE_SECCION_EXCLUIDA = re.compile(
+    r'\b(marco\s+metodol[oó]gico|dise[ñn]o\s+metodol[oó]gico|metodolog[íi]a'
+    r'|m[eé]todos?\b|methodology|methods?\b'
+    r'|resultados?\b|results?\b'
+    r'|conclusi[oó]n(?:es)?\b|conclusions?\b'
+    r'|recomendaci[oó]n(?:es)?\b|recommendations?\b)',
+    re.IGNORECASE,
+)
+
+# Secciones que se conservan aunque cuelguen de un capítulo excluido
+# (p. ej. "Hipótesis y variables" dentro del marco metodológico).
+_RE_SECCION_PROTEGIDA = re.compile(r'hip[oó]tesis|variables?\b', re.IGNORECASE)
+
+# Encabezado del índice / tabla de contenido del documento.
+_RE_ENCABEZADO_INDICE = re.compile(
+    r'^(?:#{1,3}\s*)?'
+    r'([íi]ndice(?:\s+(?:general|de\s+contenidos?))?|tabla\s+de\s+contenidos?'
+    r'|contenidos?|sumario|table\s+of\s+contents?|contents?)'
+    r'\s*:?\s*$',
+    re.IGNORECASE,
+)
+
+# Entrada del índice: "3.1 Formulación del problema ........ 24".
+# Los puntos guía son opcionales; basta el número de página al final.
+_RE_ENTRADA_INDICE = re.compile(
+    r'^\|?\s*(?P<titulo>[^|]{3,120}?)\s*'
+    r'[\s.·…_|]*?(?P<pagina>\d{1,4})\s*\|?\s*$'
+)
+
+# Corrida de puntos guía: distingue una línea del índice de un encabezado real.
+_RE_PUNTOS_GUIA = re.compile(r'[.·…_]{4,}')
+
 SYSTEM_REFERENCIAS = """Eres un extractor de referencias bibliográficas APA 7ma edición.
 Extrae CADA referencia como un objeto JSON separado, uno por línea.
 NO uses array. Cada línea debe ser un JSON válido independiente.
@@ -191,10 +227,20 @@ class EntidadExtractionService:
         logger.info("referencias_extraidas", total=len(todas))
         return todas
 
-    def extraer_citas(self, texto: str, num_paginas: int) -> list[CitaEnTexto]:
+    def extraer_citas(
+        self,
+        texto: str,
+        num_paginas: int,
+        toc: list[tuple[int, str]] | None = None,
+    ) -> list[CitaEnTexto]:
         """
         Detecta citas APA en el cuerpo del texto (HU-005).
-        Excluye la sección de referencias para evitar falsos positivos.
+        Excluye la sección de referencias para evitar falsos positivos y,
+        usando el índice del documento (TOC embebido o parseado del texto),
+        descarta metodología, resultados y conclusiones: las citas relevantes
+        viven en introducción, planteamiento del problema, marco de
+        referencias e hipótesis/variables. Sin índice utilizable se analiza
+        todo el cuerpo, como antes.
         """
         texto = self._truncar_antes_de_anexos(texto)
         match = self._encontrar_inicio_referencias(texto)
@@ -204,6 +250,8 @@ class EntidadExtractionService:
             logger.info("excluyendo_seccion_referencias", chars_excluidos=len(texto) - match.start())
         else:
             texto_cuerpo = texto
+
+        texto_cuerpo = self._recortar_secciones_no_citables(texto_cuerpo, toc)
 
         candidatos = self._detectar_citas_regex(texto_cuerpo)
         if not candidatos:
@@ -313,6 +361,183 @@ class EntidadExtractionService:
         if descartadas:
             logger.info("citas_duplicadas_descartadas", total=descartadas)
         return dedup
+
+    # ── Filtrado de secciones por índice ─────────────────────────────────────
+
+    def _recortar_secciones_no_citables(
+        self, texto: str, toc: list[tuple[int, str]] | None
+    ) -> str:
+        """
+        Elimina del cuerpo las secciones excluidas (metodología, resultados,
+        conclusiones) usando el índice como mapa: TOC embebido del PDF si
+        existe, si no el índice parseado del propio texto. Una sección
+        excluida abarca hasta la siguiente entrada del índice localizada que
+        no esté excluida y no sea subsección suya; las entradas protegidas
+        (hipótesis/variables) siempre cortan la exclusión. Si no hay índice
+        utilizable, el texto se devuelve intacto.
+        """
+        entradas = list(toc) if toc else self._titulos_desde_indice(texto)
+        if not entradas:
+            logger.info("indice_no_disponible_se_analiza_todo_el_cuerpo")
+            return texto
+
+        localizadas = self._localizar_entradas(texto, entradas)
+        if not localizadas:
+            logger.warning("titulos_del_indice_no_localizados_en_cuerpo")
+            return texto
+
+        spans: list[tuple[int, int]] = []
+        i = 0
+        while i < len(localizadas):
+            pos, nivel, titulo = localizadas[i]
+            excluida = _RE_SECCION_EXCLUIDA.search(titulo) and not _RE_SECCION_PROTEGIDA.search(titulo)
+            if not excluida:
+                i += 1
+                continue
+            j = i + 1
+            while j < len(localizadas):
+                pos_j, nivel_j, titulo_j = localizadas[j]
+                protegida_j = _RE_SECCION_PROTEGIDA.search(titulo_j)
+                excluida_j = _RE_SECCION_EXCLUIDA.search(titulo_j)
+                if protegida_j or (not excluida_j and nivel_j <= nivel):
+                    break
+                j += 1
+            fin = localizadas[j][0] if j < len(localizadas) else len(texto)
+            spans.append((pos, fin))
+            logger.info(
+                "seccion_no_citable_descartada",
+                seccion=titulo.strip()[:80],
+                chars=fin - pos,
+            )
+            i = j
+
+        if not spans:
+            return texto
+
+        partes: list[str] = []
+        cursor = 0
+        for ini, fin in spans:
+            partes.append(texto[cursor:ini])
+            cursor = fin
+        partes.append(texto[cursor:])
+        return "".join(partes)
+
+    def _titulos_desde_indice(self, texto: str) -> list[tuple[int, str]]:
+        """
+        Parsea el índice/tabla de contenido del propio texto → [(nivel, título)].
+        El nivel se infiere de la numeración decimal ("3.1" → 2). Fallback
+        para PDFs sin TOC embebido.
+        """
+        lineas = texto.splitlines()
+        inicio = None
+        for i, linea in enumerate(lineas):
+            linea_norm = re.sub(r'\*+', '', linea).strip()
+            if _RE_ENCABEZADO_INDICE.match(linea_norm):
+                inicio = i + 1
+                break
+        if inicio is None:
+            return []
+
+        entradas: list[tuple[int, str]] = []
+        sin_match = 0
+        for linea in lineas[inicio:inicio + 400]:
+            plana = re.sub(r'\*+', '', linea).strip()
+            if not plana:
+                continue
+            m = _RE_ENTRADA_INDICE.match(plana)
+            if not m:
+                sin_match += 1
+                # Tolera sub-encabezados intermedios ("ÍNDICE DE TABLAS") y
+                # ruido, pero corta cuando el índice claramente terminó.
+                if entradas and sin_match > 8:
+                    break
+                continue
+            sin_match = 0
+            titulo = m.group('titulo').strip(' .·…_')
+            pagina = m.group('pagina')
+            # Un año al final sin puntos guía es prosa, no una entrada.
+            if re.fullmatch(r'(19|20)\d{2}', pagina) and not _RE_PUNTOS_GUIA.search(plana):
+                continue
+            if len(titulo) < 3:
+                continue
+            entradas.append((self._nivel_por_numeracion(titulo), titulo))
+
+        logger.info("indice_textual_parseado", entradas=len(entradas))
+        return entradas
+
+    @staticmethod
+    def _nivel_por_numeracion(titulo: str) -> int:
+        m = re.match(r'^\s*(\d+(?:\.\d+)*)', titulo)
+        return m.group(1).count('.') + 1 if m else 1
+
+    @staticmethod
+    def _normalizar_titulo_indice(linea: str) -> str:
+        linea = re.sub(r'^#{1,3}\s*', '', linea)
+        linea = re.sub(r'\*+', ' ', linea)
+        return re.sub(r'\s+', ' ', linea).strip().rstrip(':').strip().lower()
+
+    @staticmethod
+    def _parece_encabezado_cuerpo(linea: str) -> bool:
+        """Línea con pinta de encabezado: markdown, negrita, numerada o mayúsculas."""
+        if re.match(r'^(#{1,3}\s|\*{1,2}\S|\d+(\.\d+)*\.?\s)', linea):
+            return True
+        letras = [c for c in linea if c.isalpha()]
+        return bool(letras) and sum(c.isupper() for c in letras) / len(letras) > 0.7
+
+    @classmethod
+    def _coincide_titulo(cls, norm_linea: str, norm_titulo: str, es_encabezado: bool) -> bool:
+        if norm_linea == norm_titulo:
+            return True
+        if not es_encabezado:
+            return False
+        if norm_linea.startswith(norm_titulo):
+            resto = norm_linea[len(norm_titulo):].strip()
+            # Un número al final delata la línea del propio índice ("título 24").
+            return not resto or not resto[-1].isdigit() or norm_titulo[-1].isdigit()
+        # El índice a veces trae más texto que el encabezado real del cuerpo.
+        return norm_titulo.startswith(norm_linea) and len(norm_linea) >= 8
+
+    def _localizar_entradas(
+        self, texto: str, entradas: list[tuple[int, str]]
+    ) -> list[tuple[int, int, str]]:
+        """
+        Posición en el cuerpo del encabezado de cada entrada del índice,
+        como [(offset, nivel, título)] ordenado por offset. Las líneas con
+        puntos guía (las del propio índice) no cuentan como candidatas.
+        """
+        candidatas: list[tuple[int, str, bool]] = []
+        offset = 0
+        for linea in texto.splitlines(keepends=True):
+            plana = linea.strip()
+            if plana and len(plana) <= 160 and not _RE_PUNTOS_GUIA.search(plana):
+                candidatas.append((
+                    offset,
+                    self._normalizar_titulo_indice(plana),
+                    self._parece_encabezado_cuerpo(plana),
+                ))
+            offset += len(linea)
+
+        localizadas: list[tuple[int, int, str]] = []
+        for nivel, titulo in entradas:
+            norm_titulo = self._normalizar_titulo_indice(titulo)
+            if len(norm_titulo) < 3:
+                continue
+            matches = [
+                off for off, norm, es_enc in candidatas
+                if self._coincide_titulo(norm, norm_titulo, es_enc)
+            ]
+            if matches:
+                # La última ocurrencia: el título aparece antes en el índice
+                # y su encabezado real viene después en el cuerpo.
+                localizadas.append((matches[-1], nivel, titulo))
+
+        localizadas.sort()
+        logger.info(
+            "entradas_indice_localizadas",
+            localizadas=len(localizadas),
+            total=len(entradas),
+        )
+        return localizadas
 
     @staticmethod
     def _encontrar_inicio_referencias(texto: str):

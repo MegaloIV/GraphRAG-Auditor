@@ -211,9 +211,7 @@ class RecuperacionService:
                 pagina_paper = mejor.get("pagina")
                 chunk_index  = mejor.get("chunk_index")
 
-                contenido_concat = "\n\n---\n\n".join(
-                    f["contenido"] for f in fragmentos
-                )[:3000]
+                contenido_concat = self._coser_ventana(doi_normalizado, fragmentos)
 
                 logger.debug(
                     "chunk_recuperado",
@@ -327,6 +325,41 @@ class RecuperacionService:
         return resultados
 
     # ── Internos ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _coser_ventana(doi_normalizado: str, fragmentos: list[dict]) -> str:
+        """
+        Ventana de contexto: el mejor chunk se expande con sus vecinos
+        chunk_index ± 1 y se cose como pasaje continuo, para que la evidencia
+        que cruza una frontera de chunk no produzca falsos NO_INFO. Los demás
+        fragmentos del top-k se anexan después, salvo que ya estén dentro de
+        la ventana.
+        """
+        mejor = fragmentos[0]
+        idx = mejor.get("chunk_index")
+        if idx is None:
+            return "\n\n---\n\n".join(f["contenido"] for f in fragmentos)[:3000]
+
+        vecinos = supabase_vector_service.chunks_por_rango(
+            doi_normalizado, idx - 1, idx + 1
+        )
+        if len(vecinos) > 1:
+            pasaje = "\n".join(v["contenido"].strip() for v in vecinos)
+            indices_ventana = {v["chunk_index"] for v in vecinos}
+            logger.debug(
+                "ventana_contexto_cosida",
+                chunk_index=idx,
+                vecinos=sorted(indices_ventana),
+            )
+        else:
+            pasaje = mejor["contenido"]
+            indices_ventana = {idx}
+
+        extras = [
+            f["contenido"] for f in fragmentos[1:]
+            if f.get("chunk_index") not in indices_ventana
+        ]
+        return "\n\n---\n\n".join([pasaje, *extras])[:3000]
 
     def _obtener_ruta_grafo(self, documento_id: str, cita_id: str) -> dict | None:
         try:

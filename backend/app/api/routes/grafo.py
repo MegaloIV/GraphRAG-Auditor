@@ -105,6 +105,7 @@ async def ver_citas(documento_id: str):
         MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
         OPTIONAL MATCH (c)-[:CITA_A]->(r:Referencia)
         RETURN c, r.id AS referencia_id
+        ORDER BY c.pagina ASC, c.texto ASC
         """
         citas = []
         with neo4j_service.driver.session() as session:
