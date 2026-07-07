@@ -107,6 +107,34 @@ class SupabaseVectorService:
             logger.error("error_buscar_similares", doi_normalizado=doi_normalizado, error=str(e))
             return []
 
+    def chunks_por_rango(
+        self,
+        doi_normalizado: str,
+        desde: int,
+        hasta: int,
+    ) -> list[dict]:
+        """
+        Chunks contiguos de un paper por rango de chunk_index (inclusive),
+        ordenados. Se usa para coser la ventana de contexto alrededor del
+        mejor chunk recuperado (los chunks no se solapan entre sí).
+        """
+        try:
+            conn = self._conectar()
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, contenido, pagina, titulo, doi, chunk_index
+                    FROM papers_chunks
+                    WHERE doi_normalizado = %s AND chunk_index BETWEEN %s AND %s
+                    ORDER BY chunk_index
+                    """,
+                    (doi_normalizado, desde, hasta),
+                )
+                return [dict(f) for f in cur.fetchall()]
+        except Exception as e:
+            logger.error("error_chunks_por_rango", doi_normalizado=doi_normalizado, error=str(e))
+            return []
+
     def total_chunks(self) -> int:
         """Retorna el total de chunks almacenados."""
         try:

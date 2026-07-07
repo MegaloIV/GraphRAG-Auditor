@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import { Download, AlertTriangle } from 'lucide-react'
 import TarjetaMetrica from '../components/TarjetaMetrica'
+import CoherenciaFuentes from '../components/CoherenciaFuentes'
 import { EstadoCarga, ErrorInline } from '../components/Estados'
 import { auditoriaAPI, grafoAPI } from '../api/client'
 import { descargarBlob } from '../lib/formato'
@@ -111,6 +112,8 @@ export default function PaginaCierre() {
       <ListaAlertas titulo="Citas sin referencia" alertas={alertas?.citas_sin_referencia} />
       <ListaAlertas titulo="Referencias sin citar" alertas={alertas?.referencias_sin_citar} />
       <ListaAlertas titulo="Citas no verificables (posibles alucinaciones)" alertas={alucinaciones?.alertas} />
+
+      <CoherenciaFuentes documentoId={documentoId} auditada={!!auditada} />
 
       <ErrorInline error={error} />
 

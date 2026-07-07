@@ -158,6 +158,28 @@ class PDFExtractionService:
                 accion="Verifica que el archivo no esté protegido con contraseña.",
             )
 
+    def obtener_toc(self, ruta_pdf: Path) -> list[tuple[int, str]]:
+        """
+        Índice embebido del PDF (bookmarks) como lista de (nivel, título).
+        Lista vacía si el PDF no trae TOC o no se puede leer.
+        """
+        import fitz
+
+        try:
+            with fitz.open(str(ruta_pdf)) as doc:
+                toc = doc.get_toc(simple=True)
+        except Exception as e:
+            logger.warning("toc_no_disponible", error=str(e))
+            return []
+
+        entradas = [
+            (nivel, titulo.strip())
+            for nivel, titulo, _pagina in toc
+            if titulo and titulo.strip()
+        ]
+        logger.info("toc_embebido_leido", entradas=len(entradas))
+        return entradas
+
     # Heading line: markdown (#), bold (**text**), or plain numbered (7  TÍTULO).
     _RE_ES_ENCABEZADO = re.compile(
         r'^(?:#{1,3}\s|\*{1,2}.+\*{1,2}$|\d+(?:\.\d+)*\.?\s)',

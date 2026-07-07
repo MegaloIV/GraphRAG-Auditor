@@ -48,6 +48,13 @@ async def auditar_documento(documento_id: str):
     try:
         veredictos = auditoria_service.auditar_documento(documento_id)
 
+        # Los veredictos nuevos invalidan el análisis de coherencia previo.
+        try:
+            from app.services.coherencia.coherencia_service import coherencia_service
+            coherencia_service.invalidar_cache(documento_id)
+        except Exception as e:
+            logger.warning("coherencia_no_invalidada", doc_id=documento_id, error=str(e))
+
         if not veredictos:
             raise HTTPException(
                 status_code=404,
