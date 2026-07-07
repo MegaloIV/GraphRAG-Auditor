@@ -135,6 +135,36 @@ class SupabaseVectorService:
             logger.error("error_chunks_por_rango", doi_normalizado=doi_normalizado, error=str(e))
             return []
 
+    def buscar_por_termino(
+        self,
+        doi_normalizado: str,
+        termino: str,
+        limit: int = 2,
+    ) -> list[dict]:
+        """
+        Chunks de un paper que contienen un término exacto (ancla léxica,
+        p. ej. la cifra "6.7" de la afirmación del tesista). Complementa la
+        búsqueda vectorial cuando la consulta y el paper están en idiomas
+        distintos.
+        """
+        try:
+            conn = self._conectar()
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT id, contenido, pagina, titulo, doi, chunk_index
+                    FROM papers_chunks
+                    WHERE doi_normalizado = %s AND contenido ILIKE %s
+                    ORDER BY chunk_index
+                    LIMIT %s
+                    """,
+                    (doi_normalizado, f"%{termino}%", limit),
+                )
+                return [dict(f) for f in cur.fetchall()]
+        except Exception as e:
+            logger.error("error_buscar_por_termino", termino=termino, error=str(e))
+            return []
+
     def total_chunks(self) -> int:
         """Retorna el total de chunks almacenados."""
         try:

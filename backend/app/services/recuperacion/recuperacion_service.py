@@ -10,6 +10,7 @@ HU-007: indicador de preparación (total chunks indexados para el doc)
 HU-008: consulta libre de una cita específica
 HU-009: ruta de evidencia = fragmento textual + nodos del grafo
 """
+import re
 import structlog
 from dataclasses import dataclass, field
 from typing import Optional
@@ -17,11 +18,51 @@ from typing import Optional
 from app.core.config import get_settings
 from app.services.grafo.neo4j_service import neo4j_service
 from app.services.externo.embedding_service import embedding_service
+from app.services.llm.openai_client import llm_service
 from app.services.vectorstore.supabase_service import supabase_vector_service
 
 settings = get_settings()
 
 logger = structlog.get_logger(__name__)
+
+
+# ── Limpieza de fragmentos ────────────────────────────────────────────────────
+# El markdown extraído de los PDFs arrastra ruido (negritas, encabezados,
+# separadores, saltos de línea del layout original). Se limpia en un solo
+# punto: lo que ve el juez LLM es lo mismo que ven las cartillas y el Excel.
+
+_RE_RUIDO_MD = re.compile(r"\*{1,2}|`+|^#{1,6}\s*", re.MULTILINE)
+_RE_SEPARADOR = re.compile(r"^[\s_\-—=]{3,}$", re.MULTILINE)
+_RE_SALTOS = re.compile(r"\s*\n\s*")
+
+
+def limpiar_fragmento(texto: str) -> str:
+    """Quita marcado markdown y colapsa saltos de línea en texto corrido."""
+    texto = _RE_RUIDO_MD.sub("", texto or "")
+    texto = _RE_SEPARADOR.sub(" ", texto)
+    texto = _RE_SALTOS.sub(" ", texto)
+    return re.sub(r"\s{2,}", " ", texto).strip()
+
+
+# Anclas léxicas: cifras con decimales y porcentajes de la afirmación
+# ("6.7", "80 %"). Son idénticas en español e inglés, así que rescatan
+# chunks que la similitud vectorial cross-idioma no rankea.
+_RE_NUMEROS_ANCLA = re.compile(r"\b\d+[.,]\d+\b|\b\d+\s*%")
+
+_SYSTEM_TRADUCCION = (
+    "Traduce la consulta al inglés académico. "
+    "Responde ÚNICAMENTE con la traducción, sin comillas ni comentarios."
+)
+
+
+def _terminos_ancla(texto: str) -> list[str]:
+    terminos: list[str] = []
+    for t in _RE_NUMEROS_ANCLA.findall(texto):
+        # Los papers en inglés usan punto decimal: "6,7" → "6.7".
+        t = t.strip().replace(",", ".")
+        if t not in terminos:
+            terminos.append(t)
+    return terminos[:3]
 
 
 # ── Modelos de respuesta internos ────────────────────────────────────────────
@@ -195,16 +236,11 @@ class RecuperacionService:
             confianza=confianza,
         )
 
-        # Paso 3: búsqueda vectorial en Supabase (solo si hay DOI)
+        # Paso 3: búsqueda vectorial bilingüe + anclas léxicas (solo si hay DOI)
         if doi and texto_cita:
             doi_normalizado = doi.replace("/", "_").replace(".", "_")
             query = fragmento_oracion.strip() or texto_cita
-            embedding_vec = embedding_service.generar_embedding(query)
-            fragmentos = supabase_vector_service.buscar_similares(
-                embedding=embedding_vec,
-                doi_normalizado=doi_normalizado,
-                top_k=n_fragmentos,
-            )
+            fragmentos = self._buscar_fragmentos(query, doi_normalizado, n_fragmentos)
 
             if fragmentos:
                 mejor = fragmentos[0]
@@ -326,25 +362,89 @@ class RecuperacionService:
 
     # ── Internos ──────────────────────────────────────────────────────────
 
+    def _buscar_fragmentos(
+        self, query: str, doi_normalizado: str, top_k: int
+    ) -> list[dict]:
+        """
+        Búsqueda en dos frentes para cerrar la brecha español→inglés:
+
+        1. Vectorial bilingüe: la consulta se busca tal cual Y traducida al
+           inglés (la tesis está en español, los papers casi siempre en
+           inglés); los resultados se fusionan por mejor similitud.
+        2. Anclas léxicas: los chunks que contienen las cifras de la
+           afirmación ("6.7", "80%") se anexan como candidatos aunque el
+           vector no los haya rankeado — el juez los recibe como pasajes
+           adicionales.
+        """
+        consultas = [query]
+        traduccion = self._traducir_a_ingles(query)
+        if traduccion and traduccion.lower() != query.lower():
+            consultas.append(traduccion)
+
+        por_id: dict[str, dict] = {}
+        for consulta in consultas:
+            embedding_vec = embedding_service.generar_embedding(consulta)
+            for f in supabase_vector_service.buscar_similares(
+                embedding=embedding_vec,
+                doi_normalizado=doi_normalizado,
+                top_k=top_k,
+            ):
+                previo = por_id.get(f["id"])
+                if previo is None or f["similitud"] > previo["similitud"]:
+                    por_id[f["id"]] = f
+
+        fragmentos = sorted(
+            por_id.values(), key=lambda f: f["similitud"], reverse=True
+        )[:top_k]
+
+        ids = {f["id"] for f in fragmentos}
+        for termino in _terminos_ancla(query):
+            for f in supabase_vector_service.buscar_por_termino(
+                doi_normalizado, termino, limit=1
+            ):
+                if f["id"] not in ids:
+                    f["similitud"] = 0.0
+                    fragmentos.append(f)
+                    ids.add(f["id"])
+                    logger.debug("ancla_lexica_anexada", termino=termino, chunk=f["chunk_index"])
+
+        return fragmentos
+
+    @staticmethod
+    def _traducir_a_ingles(texto: str) -> str | None:
+        """Traducción barata de la consulta (1-2 oraciones); None si falla."""
+        try:
+            traduccion = llm_service.completar(
+                system_prompt=_SYSTEM_TRADUCCION,
+                user_prompt=texto[:800],
+            ).strip()
+            return traduccion or None
+        except Exception as e:
+            logger.warning("traduccion_query_fallida", error=str(e))
+            return None
+
     @staticmethod
     def _coser_ventana(doi_normalizado: str, fragmentos: list[dict]) -> str:
         """
         Ventana de contexto: el mejor chunk se expande con sus vecinos
         chunk_index ± 1 y se cose como pasaje continuo, para que la evidencia
         que cruza una frontera de chunk no produzca falsos NO_INFO. Los demás
-        fragmentos del top-k se anexan después, salvo que ya estén dentro de
-        la ventana.
+        fragmentos (top-k y anclas léxicas) se anexan después, salvo que ya
+        estén dentro de la ventana. Todo pasa por limpiar_fragmento: el juez,
+        las cartillas y el Excel ven el mismo texto sin ruido de markdown.
         """
         mejor = fragmentos[0]
         idx = mejor.get("chunk_index")
         if idx is None:
-            return "\n\n---\n\n".join(f["contenido"] for f in fragmentos)[:3000]
+            return "\n\n---\n\n".join(
+                limpiar_fragmento(f["contenido"]) for f in fragmentos
+            )[:3000]
 
         vecinos = supabase_vector_service.chunks_por_rango(
             doi_normalizado, idx - 1, idx + 1
         )
         if len(vecinos) > 1:
-            pasaje = "\n".join(v["contenido"].strip() for v in vecinos)
+            pasaje = " ".join(limpiar_fragmento(v["contenido"]) for v in vecinos)
             indices_ventana = {v["chunk_index"] for v in vecinos}
             logger.debug(
                 "ventana_contexto_cosida",
@@ -352,14 +452,15 @@ class RecuperacionService:
                 vecinos=sorted(indices_ventana),
             )
         else:
-            pasaje = mejor["contenido"]
+            pasaje = limpiar_fragmento(mejor["contenido"])
             indices_ventana = {idx}
 
         extras = [
-            f["contenido"] for f in fragmentos[1:]
+            limpiar_fragmento(f["contenido"])[:700]
+            for f in fragmentos[1:]
             if f.get("chunk_index") not in indices_ventana
-        ]
-        return "\n\n---\n\n".join([pasaje, *extras])[:3000]
+        ][:3]
+        return "\n\n---\n\n".join([pasaje[:2400], *extras])
 
     def _obtener_ruta_grafo(self, documento_id: str, cita_id: str) -> dict | None:
         try:
