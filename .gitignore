@@ -12,3 +12,4 @@ __pycache__/
 backend/sql
 .claude/
 env.yaml
+/docs
