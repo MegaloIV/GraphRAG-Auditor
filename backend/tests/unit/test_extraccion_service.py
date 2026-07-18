@@ -1,409 +1,196 @@
 """
-Tests unitarios para el servicio de extracción de entidades.
-Cubre HU-004 y HU-005 con casos de regex y parsing JSON.
-No llama al LLM real — los tests de integración lo mockean.
+EntidadExtractionService — detección de citas y delimitación de secciones.
+
+Todo se prueba sobre el texto real de la tesis. Las funciones que llaman al LLM
+(extraer_citas / extraer_referencias) no se tocan aquí: lo que se prueba es la
+lógica determinista que decide QUÉ texto se le manda al LLM y cómo se limpia lo
+que devuelve.
 """
 import re
-from pathlib import Path
 
-import pytest
-import app.services.grafo.extraccion_service as extraccion_mod
-from app.services.grafo.extraccion_service import (
-    EntidadExtractionService,
-    SYSTEM_CITAS,
-    _RE_INICIO_ANEXOS,
-    _RE_ANEXO_NUMERADO,
-    _RE_REFERENCIAS_NUMERADA,
-)
-
-_PDF_TESIS = Path(__file__).parent.parent / "Informe de tesis_AlcaldeLavadoMatias.pdf"
-
-
-@pytest.fixture
-def service():
-    return EntidadExtractionService()
+from app.models.grafo import CitaEnTexto, TipoCita
 
 
 class TestDetectarCitasRegex:
-    """HU-005: Detección de citas parentéticas y narrativas."""
+    """Prefiltro por regex: es lo que ancla la detección antes del LLM."""
 
-    def test_detecta_cita_parentetica_simple(self, service):
-        texto = "Este fenómeno fue descrito por primera vez (García, 2020)."
-        citas = service._detectar_citas_regex(texto)
-        assert any("García" in c for c in citas)
+    def test_encuentra_citas_en_la_tesis_real(self, svc, texto_tesis):
+        citas = svc._detectar_citas_regex(texto_tesis)
+        assert len(citas) >= 30
 
-    def test_detecta_cita_narrativa(self, service):
-        texto = "Como señala López (2019), el modelo propuesto es válido."
-        citas = service._detectar_citas_regex(texto)
-        assert any("López" in c for c in citas)
+    def test_detecta_una_parentetica_con_et_al(self, svc, texto_tesis):
+        citas = svc._detectar_citas_regex(texto_tesis)
+        assert "(Edge et al., 2024)" in citas
 
-    def test_detecta_multiples_citas(self, service):
-        texto = (
-            "Según Martínez (2021), el enfoque es válido. "
-            "Sin embargo (Rodríguez, 2022) propone una alternativa."
-        )
-        citas = service._detectar_citas_regex(texto)
-        assert len(citas) >= 2
+    def test_detecta_una_parentetica_de_dos_autores_con_y(self, svc, texto_tesis):
+        citas = svc._detectar_citas_regex(texto_tesis)
+        assert "(Klesel y Wittmann, 2025)" in citas
 
-    def test_no_detecta_version_como_cita(self, service):
-        texto = "La versión (3.0) del software fue lanzada en 2020."
-        citas = service._detectar_citas_regex(texto)
-        assert len(citas) == 0
+    def test_todas_las_citas_llevan_un_anio_valido(self, svc, texto_tesis):
+        citas = svc._detectar_citas_regex(texto_tesis)
+        assert all(re.search(r"\b(19|20)\d{2}\b", c) for c in citas)
 
-    def test_no_detecta_año_suelto_como_cita(self, service):
-        texto = "El año 2020 fue complicado para todos."
-        citas = service._detectar_citas_regex(texto)
-        assert len(citas) == 0
+    def test_no_devuelve_subcoincidencias_de_otra_cita(self, svc, texto_tesis):
+        citas = svc._detectar_citas_regex(texto_tesis)
+        for cita in citas:
+            assert not any(cita != otra and cita in otra for otra in citas)
 
-    def test_detecta_cita_con_pagina(self, service):
-        texto = "El autor lo expresa claramente (García, 2020, p. 45)."
-        citas = service._detectar_citas_regex(texto)
-        assert any("García" in c for c in citas)
+    def test_un_texto_sin_citas_no_devuelve_nada(self, svc):
+        assert svc._detectar_citas_regex("Un párrafo cualquiera sin ninguna cita APA.") == []
 
 
-class TestDividirTexto:
-    """Validación del batching de texto."""
+class TestSeccionDeReferencias:
+    """Delimitación de la bibliografía dentro del documento."""
 
-    def test_texto_corto_no_se_divide(self, service):
-        texto = "Texto corto de prueba."
-        bloques = service._dividir_texto(texto, max_chars=1000)
-        assert len(bloques) == 1
+    def test_encuentra_el_encabezado_de_referencias(self, svc, texto_tesis):
+        match = svc._encontrar_inicio_referencias(texto_tesis)
+        assert match is not None
+        assert "Referencias bibliográficas" in match.group()
 
-    def test_texto_largo_se_divide(self, service):
-        texto = "Párrafo de prueba.\n\n" * 100
-        bloques = service._dividir_texto(texto, max_chars=500)
+    def test_el_encabezado_esta_en_la_parte_final_del_documento(self, svc, texto_tesis):
+        match = svc._encontrar_inicio_referencias(texto_tesis)
+        assert match.start() > len(texto_tesis) * 0.5
+
+    def test_un_texto_sin_bibliografia_no_devuelve_encabezado(self, svc):
+        assert svc._encontrar_inicio_referencias("# Introducción\n\nTexto del cuerpo.") is None
+
+    def test_la_seccion_contiene_las_entradas_bibliograficas(self, seccion_referencias):
+        assert "Ansari, S. (2026)" in seccion_referencias
+        assert len(seccion_referencias) > 10_000
+
+    def test_la_seccion_contiene_los_doi_de_las_fuentes(self, seccion_referencias):
+        dois = re.findall(r"10\.\d{4,9}/\S+", seccion_referencias)
+        assert len(dois) >= 30
+
+
+class TestTruncarAntesDeAnexos:
+    """Los anexos no se auditan: se recortan antes de detectar nada."""
+
+    def test_recorta_los_anexos_de_la_tesis(self, svc, texto_tesis, texto_cuerpo):
+        assert len(texto_cuerpo) < len(texto_tesis)
+
+    def test_el_cuerpo_es_un_prefijo_exacto_del_documento(self, texto_tesis, texto_cuerpo):
+        assert texto_tesis.startswith(texto_cuerpo)
+
+    def test_conserva_la_bibliografia_que_precede_a_los_anexos(self, texto_cuerpo):
+        assert "Referencias bibliográficas" in texto_cuerpo
+
+    def test_un_texto_sin_anexos_no_se_recorta(self, svc):
+        texto = "# Introducción\n\nCuerpo del documento sin apéndices."
+        assert svc._truncar_antes_de_anexos(texto) == texto
+
+
+class TestIndiceYSeccionesNoCitables:
+    """El índice del propio texto sirve de mapa para descartar secciones."""
+
+    def test_parsea_el_indice_de_la_tesis(self, svc, texto_tesis):
+        entradas = svc._titulos_desde_indice(texto_tesis)
+        assert len(entradas) >= 40
+
+    def test_el_nivel_se_infiere_de_la_numeracion(self, svc, texto_tesis):
+        entradas = dict((titulo, nivel) for nivel, titulo in svc._titulos_desde_indice(texto_tesis))
+        assert entradas["1. Introducción"] == 1
+        assert entradas["1.1. Contexto y antecedentes"] == 2
+
+    def test_descarta_el_marco_metodologico(self, svc, texto_tesis):
+        recortado = svc._recortar_secciones_no_citables(texto_tesis, None)
+        assert len(recortado) < len(texto_tesis)
+
+    def test_sin_indice_el_texto_se_devuelve_intacto(self, svc):
+        texto = "# Introducción\n\nCuerpo sin tabla de contenido."
+        assert svc._recortar_secciones_no_citables(texto, None) == texto
+
+
+class TestDividirEnBloques:
+    """El cuerpo se trocea para caber en la ventana del LLM."""
+
+    def test_trocea_el_cuerpo_de_la_tesis(self, svc, texto_cuerpo):
+        bloques = svc._dividir_en_bloques(texto_cuerpo)
         assert len(bloques) > 1
 
-    def test_bloques_no_estan_vacios(self, service):
-        texto = "Párrafo de prueba.\n\n" * 50
-        bloques = service._dividir_texto(texto, max_chars=500)
-        for bloque in bloques:
-            assert len(bloque.strip()) > 0
+    def test_ningun_bloque_supera_el_maximo(self, svc, texto_cuerpo):
+        bloques = svc._dividir_en_bloques(texto_cuerpo)
+        assert all(len(b) <= 7000 for b in bloques)
+
+    def test_no_se_generan_bloques_vacios(self, svc, texto_cuerpo):
+        bloques = svc._dividir_en_bloques(texto_cuerpo)
+        assert all(b.strip() for b in bloques)
+
+    def test_las_citas_sobreviven_al_troceado(self, svc, texto_cuerpo):
+        bloques = svc._dividir_en_bloques(texto_cuerpo)
+        assert any("(Edge et al., 2024)" in b for b in bloques)
 
 
-class TestParsearJson:
-    """Validación del parser JSON robusto."""
+class TestDeduplicarCitas:
+    """La misma ocurrencia extraída dos veces se colapsa; dos ocurrencias reales no."""
 
-    def test_parsea_json_limpio(self, service):
-        json_str = '[{"titulo": "Paper de prueba", "autores": ["García, J."]}]'
-        resultado = service._parsear_json(json_str)
-        assert len(resultado) == 1
-        assert resultado[0]["titulo"] == "Paper de prueba"
-
-    def test_parsea_json_con_fence_markdown(self, service):
-        json_str = '```json\n[{"titulo": "Paper"}]\n```'
-        resultado = service._parsear_json(json_str)
-        assert len(resultado) == 1
-
-    def test_retorna_lista_vacia_ante_json_invalido(self, service):
-        resultado = service._parsear_json("esto no es JSON para nada")
-        assert resultado == []
-
-    def test_retorna_lista_vacia_ante_texto_vacio(self, service):
-        resultado = service._parsear_json("")
-        assert resultado == []
-
-
-class TestClasificacionTipoCita:
-    """Garantiza que el tipo se determina por texto_cita, ignorando lo que devuelva el LLM."""
-
-    def _mock_completar(self, tipo_llm: str):
-        """Devuelve un mock que reporta siempre el tipo_llm indicado."""
-        def completar_mock(system_prompt: str, user_prompt: str, **kwargs) -> str:
-            return (
-                f'[{{"texto_cita": "(Arévalo et al., 2021)", "tipo": "{tipo_llm}",'
-                f' "pagina": 1, "fragmento_oracion": "Texto (Arévalo et al., 2021)."}},'
-                f' {{"texto_cita": "García (2020)", "tipo": "{tipo_llm}",'
-                f' "pagina": 1, "fragmento_oracion": "García (2020) propone un modelo."}}]'
-            )
-        return completar_mock
-
-    def test_parentetica_cuando_texto_empieza_con_parentesis(self, monkeypatch, service):
-        monkeypatch.setattr(
-            extraccion_mod.llm_service, "completar",
-            self._mock_completar("narrativa"),  # LLM dice NARRATIVA, debe corregirse
+    def _cita(self, texto: str, fragmento: str, cita_id: str = "c1") -> CitaEnTexto:
+        return CitaEnTexto(
+            cita_id=cita_id,
+            texto_cita=texto,
+            tipo=TipoCita.PARENTETICA,
+            pagina=1,
+            fragmento_oracion=fragmento,
         )
-        citas = service.extraer_citas("Texto (Arévalo et al., 2021).", num_paginas=1)
-        parentetica = next(c for c in citas if c.texto_cita.startswith("("))
-        assert parentetica.tipo.value == "parentetica"
 
-    def test_narrativa_cuando_texto_no_empieza_con_parentesis(self, monkeypatch, service):
-        monkeypatch.setattr(
-            extraccion_mod.llm_service, "completar",
-            self._mock_completar("parentetica"),  # LLM dice PARENTETICA, debe corregirse
+    def test_colapsa_fragmentos_contenidos_y_conserva_el_mas_corto(self, svc):
+        corto = "GraphRAG mejora la recuperación (Edge et al., 2024)."
+        largo = "En trabajos recientes se observa que GraphRAG mejora la recuperación (Edge et al., 2024)."
+        dedup = svc._deduplicar_citas([
+            self._cita("(Edge et al., 2024)", largo, "c1"),
+            self._cita("(Edge et al., 2024)", corto, "c2"),
+        ])
+        assert len(dedup) == 1
+        assert dedup[0].fragmento_oracion == corto
+
+    def test_conserva_la_misma_cita_en_parrafos_distintos(self, svc):
+        dedup = svc._deduplicar_citas([
+            self._cita("(Edge et al., 2024)", "El grafo estructura el corpus.", "c1"),
+            self._cita("(Edge et al., 2024)", "La evaluación se hizo sobre preguntas globales.", "c2"),
+        ])
+        assert len(dedup) == 2
+
+    def test_citas_distintas_nunca_se_colapsan(self, svc):
+        dedup = svc._deduplicar_citas([
+            self._cita("(Edge et al., 2024)", "Un fragmento.", "c1"),
+            self._cita("(Fan et al., 2024)", "Un fragmento.", "c2"),
+        ])
+        assert len(dedup) == 2
+
+
+class TestExtraerOracionFallback:
+    """Cuando el LLM no devuelve la aseveración, se recorta del propio texto."""
+
+    def test_recupera_la_oracion_que_rodea_a_la_cita(self, svc, texto_cuerpo):
+        cita = "(Edge et al., 2024)"
+        bloque = next(b for b in svc._dividir_en_bloques(texto_cuerpo) if cita in b)
+        fragmento = svc._extraer_oracion_fallback(bloque, cita)
+        assert cita in fragmento
+        assert fragmento.endswith(cita)
+        assert len(fragmento) <= 800
+
+    def test_si_la_cita_no_esta_en_el_bloque_devuelve_vacio(self, svc, texto_cuerpo):
+        bloque = svc._dividir_en_bloques(texto_cuerpo)[0]
+        assert svc._extraer_oracion_fallback(bloque, "(Inexistente, 1999)") == ""
+
+
+class TestParsearJSON:
+    """Respuestas del LLM: JSONL, array y basura."""
+
+    def test_parsea_una_respuesta_jsonl(self, svc):
+        respuesta = (
+            '{"autores": ["Ansari, S."], "anio": 2026, "titulo": "Compound Deception in Elite Peer Review"}\n'
+            '{"autores": ["Edge, D."], "anio": 2024, "titulo": "From Local to Global"}'
         )
-        citas = service.extraer_citas("García (2020) propone un modelo.", num_paginas=1)
-        narrativa = next(c for c in citas if not c.texto_cita.startswith("("))
-        assert narrativa.tipo.value == "narrativa"
+        objetos = svc._parsear_json(respuesta)
+        assert len(objetos) == 2
+        assert objetos[0]["anio"] == 2026
 
+    def test_parsea_un_array_envuelto_en_markdown(self, svc):
+        respuesta = '```json\n[{"texto_cita": "(Edge et al., 2024)", "tipo": "PARENTETICA"}]\n```'
+        objetos = svc._parsear_json(respuesta)
+        assert len(objetos) == 1
+        assert objetos[0]["tipo"] == "PARENTETICA"
 
-class TestExtraerCitasSystemPrompt:
-    """Integración: verifica que extraer_citas pasa el system prompt correcto al LLM."""
-
-    def test_system_prompt_contiene_palabras_clave(self):
-        assert "empieza donde empieza esa idea" in SYSTEM_CITAS
-        assert "termina exactamente al cierre" in SYSTEM_CITAS
-        assert "NO la dividas" in SYSTEM_CITAS
-
-    def test_llm_recibe_system_prompt_correcto(self, monkeypatch, service):
-        llamadas: list[str] = []
-
-        def completar_mock(system_prompt: str, user_prompt: str, **kwargs) -> str:
-            llamadas.append(system_prompt)
-            return (
-                '[{"texto_cita": "(García, 2020)", "tipo": "parentetica",'
-                ' "pagina": 1, "fragmento_oracion": "Texto de prueba (García, 2020)"}]'
-            )
-
-        monkeypatch.setattr(extraccion_mod.llm_service, "completar", completar_mock)
-
-        service.extraer_citas("Texto de prueba (García, 2020).", num_paginas=1)
-
-        assert len(llamadas) >= 1, "El LLM no fue llamado"
-        system_usado = llamadas[0]
-        assert "empieza donde empieza esa idea" in system_usado
-        assert "termina exactamente al cierre" in system_usado
-        assert "NO la dividas" in system_usado
-
-
-class TestTruncarAnexos:
-    """Pre-filtrado de sección de Anexos antes de la extracción."""
-
-    def test_trunca_h1_anexos(self, service):
-        texto = "Cuerpo del documento.\n\n# Anexos\n\nContenido de anexo que no debe extraerse."
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert "Contenido de anexo" not in resultado
-        assert "Cuerpo del documento" in resultado
-
-    def test_trunca_h2_anexo(self, service):
-        texto = "Cuerpo.\n\n## Anexo\n\nContenido contaminante."
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert "Contenido contaminante" not in resultado
-
-    def test_trunca_h3_apendices(self, service):
-        texto = "Cuerpo.\n\n### Apéndices\n\nTablas extras."
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert "Tablas extras" not in resultado
-
-    def test_trunca_negrita_anexos(self, service):
-        texto = "Cuerpo.\n\n**Anexos**\n\nContenido."
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert "Contenido" not in resultado
-
-    def test_trunca_mayusculas_anexos(self, service):
-        texto = "Cuerpo.\n\nANEXOS\n\nContenido."
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert "Contenido" not in resultado
-
-    def test_trunca_apendice_singular(self, service):
-        texto = "Cuerpo.\n\n# Apéndice\n\nDatos extra."
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert "Datos extra" not in resultado
-
-    def test_trunca_appendix_ingles(self, service):
-        texto = "Body text.\n\n# Appendix\n\nExtra content."
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert "Extra content" not in resultado
-
-    def test_sin_anexos_devuelve_texto_intacto(self, service):
-        texto = "# Introducción\n\nContenido.\n\n# Referencias\n\n- Autor (2020)."
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert resultado == texto
-
-    def test_descarta_todo_lo_que_sigue_a_los_anexos(self, service):
-        texto = (
-            "Conclusiones.\n\n"
-            "# Anexos\n\n"
-            "## Anexo A\n\nTabla de datos.\n\n"
-            "## Anexo B\n\nCódigo fuente."
-        )
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert "Anexo A" not in resultado
-        assert "Anexo B" not in resultado
-        assert "Conclusiones" in resultado
-
-    def test_referencias_antes_de_anexos_se_preservan(self, service):
-        texto = (
-            "# Introducción\n\nTexto.\n\n"
-            "# Referencias\n\n- García, J. (2020). Título.\n\n"
-            "# Anexos\n\nDatos que no deben incluirse."
-        )
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert "García, J. (2020)" in resultado
-        assert "Datos que no deben incluirse" not in resultado
-
-    def test_trunca_anexo_numerado_despues_del_70_porciento(self, service):
-        # "Anexo 2." aparece en la posición 1002, que es > 70% de ~1060 chars totales.
-        cuerpo = "x" * 1000
-        anexo = "\n\nAnexo 2. Evidencias de la investigación.\n\nContenido que debe descartarse."
-        texto = cuerpo + anexo
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert "Contenido que debe descartarse" not in resultado
-        assert len(resultado) < len(texto)
-
-    def test_no_trunca_anexo_numerado_antes_del_70_porciento(self, service):
-        # "Anexo 2." está en la posición 0 (< 70%) → no debe truncar.
-        prefijo = "Anexo 2. Evidencias de la investigación.\n\n"
-        sufijo = "x" * 1000
-        texto = prefijo + sufijo
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert resultado == texto
-
-    def test_formato_exacto_de_la_tesis(self, service):
-        # Simula el formato real: líneas planas tipo "Anexo N. Título." al final.
-        cuerpo = "Conclusiones del trabajo de investigación.\n\n" + "x" * 900
-        lineas_anexos = (
-            "\nAnexo 2. Evidencias de la ejecución de la investigación."
-            "\nAnexo 3. Resolución de aprobación del proyecto."
-        )
-        texto = cuerpo + lineas_anexos
-        resultado = service._truncar_antes_de_anexos(texto)
-        assert "Evidencias de la ejecución" not in resultado
-        assert "Resolución de aprobación" not in resultado
-        assert "Conclusiones del trabajo" in resultado
-
-
-class TestDetectarInicioReferencias:
-    """Detección del encabezado de la sección de referencias."""
-
-    def test_detecta_encabezado_numerado_con_adjetivo(self, service):
-        # Caso real: "7.  Referencias bibliográficas" como texto plano numerado.
-        texto = (
-            "...cuerpo...\n\n"
-            "7.  Referencias bibliográficas\n\n"
-            "Apellido, N. (2024). Título del artículo.\n\n"
-            "Anexo 1. Algo"
-        )
-        match = service._encontrar_inicio_referencias(texto)
-
-        assert match is not None, "El encabezado '7.  Referencias bibliográficas' no fue detectado"
-        assert "Referencias" in match.group()
-
-        # La sección va desde el encabezado hasta antes del inicio del anexo
-        pos_anexo = texto.find("\nAnexo 1.")
-        texto_refs = texto[match.start():pos_anexo]
-        assert "Apellido, N. (2024). Título del artículo." in texto_refs
-
-    def test_detecta_encabezado_markdown_clasico(self, service):
-        texto = "# Introducción\n\nTexto.\n\n# Referencias\n\n- Autor (2020)."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-        assert "Referencias" in match.group()
-
-    def test_detecta_bibliografia_numerada_sin_adjetivo(self, service):
-        texto = "Cuerpo.\n\n8. Bibliografía\n\nAutor (2021). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-        assert "Bibliografía" in match.group()
-
-    def test_detecta_referencias_numeradas_sin_adjetivo(self, service):
-        texto = "Cuerpo.\n\n5. Referencias\n\nAutor (2020)."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-    def test_retorna_none_si_no_hay_seccion_referencias(self, service):
-        texto = "# Introducción\n\nContenido sin sección de referencias."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is None
-
-    def test_patron_numerado_no_captura_dentro_del_cuerpo(self, service):
-        # Una mención inline no debe confundirse con el encabezado de sección.
-        # El patrón requiere que la línea comience con el número y termine ahí.
-        texto = "Como se describe en las referencias 3.1 del documento, el modelo es válido."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is None
-
-    def test_detecta_lista_de_referencias(self, service):
-        texto = "Cuerpo.\n\nLista de referencias\n\nAutor (2020). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-        assert "referencias" in match.group().lower()
-
-    def test_detecta_lista_de_referencias_bibliograficas(self, service):
-        texto = "Cuerpo.\n\nLista de referencias bibliográficas\n\nAutor (2020). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-    def test_detecta_encabezado_con_dos_puntos(self, service):
-        texto = "Cuerpo.\n\nReferencias:\n\nAutor (2020). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-    def test_detecta_bibliografia_con_dos_puntos(self, service):
-        texto = "Cuerpo.\n\nBibliografía:\n\nAutor (2020). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-    def test_detecta_numeracion_decimal_simple(self, service):
-        texto = "Cuerpo.\n\n3.1 Referencias\n\nAutor (2020). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-    def test_detecta_numeracion_decimal_con_punto_final(self, service):
-        texto = "Cuerpo.\n\n3.1. Referencias bibliográficas\n\nAutor (2020). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-    def test_detecta_numeracion_decimal_tres_niveles(self, service):
-        texto = "Cuerpo.\n\n2.3.1 Bibliografía\n\nAutor (2020). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-    def test_detecta_reference_list_ingles(self, service):
-        texto = "Body text.\n\nReference list\n\nAuthor (2020). Title."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-    def test_detecta_negrita_numero_y_compuesto(self, service):
-        # Caso real: pymupdf4llm convierte heading bold con número a **7    REFERENCIAS BIBLIOGRAFICAS**
-        texto = "Cuerpo.\n\n**7    REFERENCIAS BIBLIOGRAFICAS**\n\nAutor (2021). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-    def test_detecta_negrita_numero_tab_y_compuesto(self, service):
-        texto = "Cuerpo.\n\n**7\tREFERENCIAS BIBLIOGRAFICAS**\n\nAutor (2021). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-    def test_detecta_markdown_heading_numero_y_compuesto(self, service):
-        # Variante con heading markdown: ## 7 REFERENCIAS BIBLIOGRAFICAS
-        texto = "Cuerpo.\n\n## 7 REFERENCIAS BIBLIOGRAFICAS\n\nAutor (2021). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-    def test_detecta_referencias_bibliograficas_sin_acento(self, service):
-        # PDFs que pierden tilde: BIBLIOGRAFICAS en lugar de BIBLIOGRÁFICAS
-        texto = "Cuerpo.\n\n7. REFERENCIAS BIBLIOGRAFICAS\n\nAutor (2021). Título."
-        match = service._encontrar_inicio_referencias(texto)
-        assert match is not None
-
-
-@pytest.mark.skipif(
-    not _PDF_TESIS.exists(),
-    reason="PDF de tesis no disponible en el entorno de prueba",
-)
-class TestTruncarAnexosConPDFReal:
-    """Verifica que la detección de anexos funciona sobre el PDF de tesis real."""
-
-    def test_trunca_seccion_anexos_en_tesis_real(self, service):
-        import pymupdf4llm
-
-        texto = pymupdf4llm.to_markdown(str(_PDF_TESIS))
-        texto_truncado = service._truncar_antes_de_anexos(texto)
-
-        assert len(texto_truncado) < len(texto), (
-            "Se esperaba encontrar una sección de Anexos en la tesis y descartar "
-            "el contenido posterior"
-        )
-        # El encabezado markdown de anexos no debe aparecer en el texto truncado
-        assert not _RE_INICIO_ANEXOS.search(texto_truncado), (
-            "El encabezado markdown de Anexos/Apéndice sigue presente tras el truncado"
-        )
-        # El patrón numerado no debe aparecer después del 70% del texto truncado
-        limite_70 = int(len(texto_truncado) * 0.70)
-        for m in _RE_ANEXO_NUMERADO.finditer(texto_truncado):
-            if m.start() >= limite_70:
-                pytest.fail(
-                    f"Patrón 'Anexo N.' encontrado en posición {m.start()} "
-                    f"(después del umbral 70% = {limite_70}) del texto truncado"
-                )
+    def test_una_respuesta_sin_json_no_rompe(self, svc):
+        assert svc._parsear_json("No he encontrado ninguna cita.") == []

@@ -1,130 +1,139 @@
 """
-Tests unitarios para la propagación de pagina_paper en RecuperacionService.
-No conecta a Neo4j ni ChromaDB reales.
+RecuperacionService — recuperación híbrida (grafo + pgvector).
+
+Lo que se prueba aquí es la decisión de qué evidencia se entrega al juez y con
+qué método. Neo4j y pgvector están mockeados; no se abre ninguna conexión ni se
+calcula ningún embedding real.
+
+La regla crítica: la búsqueda vectorial se restringe al DOI de la referencia que
+la cita dice estar citando. Sin esa restricción, el sistema podría "encontrar
+evidencia" en un paper distinto.
 """
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
+from app.services.recuperacion.recuperacion_service import RecuperacionService
 
-from app.services.recuperacion.recuperacion_service import (
-    RecuperacionService,
-    ResultadoRecuperacion,
-)
+DOI = "10.3390/educsci11040173"
+DOI_CHUNKS = "10_3390_educsci11040173"
 
+_RUTA = {
+    "texto_cita": "(Edge et al., 2024)",
+    "ref_id": "r1",
+    "doi": DOI,
+    "doi_raw": DOI,
+    "autores": ["Edge, D."],
+    "ref_titulo": "From Local to Global: A GraphRAG Approach",
+    "ref_anio": 2024,
+    "confianza_vinculo": 0.95,
+}
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+_FRAGMENTO = {
+    "contenido": "GraphRAG outperforms naive RAG on global sensemaking questions.",
+    "similitud": 0.87,
+    "pagina": 4,
+    "chunk_index": 12,
+}
 
-def _fragmento_chroma(pagina: int, chunk_index: int, similitud: float = 0.92) -> dict:
-    return {
-        "texto": f"Contenido de la página {pagina}.",
-        "metadata": {
-            "doi": "10.1234/test",
-            "doi_normalizado": "10_1234_test",
-            "titulo": "Paper de prueba",
-            "anio": "2024",
-            "nivel_confianza": "abstract",
-            "referencia_id": "ref_1",
-            "pagina": pagina,
-            "chunk_index": chunk_index,
-        },
-        "similitud": similitud,
-    }
-
-
-def _ruta_neo4j(cita_id: str = "cita_1") -> dict:
-    return {
-        "cita_id": cita_id,
-        "texto_cita": "Smith (2020) afirma que X.",
-        "ref_id": "ref_1",
-        "doi": "10.1234/test",
-        "doi_raw": None,
-        "ref_titulo": "Paper de prueba",
-        "ref_anio": 2020,
-        "autores": ["Smith, J."],
-        "confianza_vinculo": 0.9,
-    }
+_P_RUTA = "app.services.recuperacion.recuperacion_service.RecuperacionService._obtener_ruta_grafo"
+_P_FRAG = "app.services.recuperacion.recuperacion_service.RecuperacionService._buscar_fragmentos"
+_P_NODOS = "app.services.recuperacion.recuperacion_service.RecuperacionService._construir_nodos_grafo"
+_P_COSER = "app.services.recuperacion.recuperacion_service.RecuperacionService._coser_ventana"
 
 
-# ---------------------------------------------------------------------------
-# Tests de propagación de pagina_paper
-# ---------------------------------------------------------------------------
+class TestConsultarCita:
 
-class TestPaginaPaperPropagacion:
-
-    def _service_con_mocks(self, fragmentos: list[dict], ruta: dict | None):
-        """Construye un RecuperacionService con Neo4j y ChromaDB mockeados."""
-        service = RecuperacionService.__new__(RecuperacionService)
-
-        neo4j_mock = MagicMock()
-        session_mock = MagicMock()
-        session_mock.__enter__ = MagicMock(return_value=session_mock)
-        session_mock.__exit__ = MagicMock(return_value=False)
-        result_mock = MagicMock()
-        result_mock.single.return_value = ruta
-        session_mock.run.return_value = result_mock
-        neo4j_mock.driver.session.return_value = session_mock
-
-        embedding_mock = MagicMock()
-        embedding_mock.buscar_similares.return_value = fragmentos
-
+    def test_con_doi_y_chunks_devuelve_evidencia_por_metodo_hibrido(self):
         with (
-            patch("app.services.recuperacion.recuperacion_service.neo4j_service", neo4j_mock),
-            patch("app.services.recuperacion.recuperacion_service.embedding_service", embedding_mock),
+            patch(_P_RUTA, return_value=_RUTA),
+            patch(_P_NODOS, return_value=[]),
+            patch(_P_FRAG, return_value=[_FRAGMENTO]),
+            patch(_P_COSER, return_value=_FRAGMENTO["contenido"]),
         ):
-            resultado = service.consultar_cita(
-                documento_id="doc_1",
-                cita_id="cita_1",
-            )
+            r = RecuperacionService().consultar_cita("doc-1", "c1")
 
-        return resultado
+        assert r.metodo == "hibrido"
+        assert r.fragmento_relevante == _FRAGMENTO["contenido"]
+        assert r.similitud == 0.87
+        assert r.doi_referencia == DOI
+        assert r.referencia_id == "r1"
 
-    def test_pagina_paper_llega_como_3(self):
-        fragmentos = [_fragmento_chroma(pagina=3, chunk_index=2)]
-        resultado = self._service_con_mocks(fragmentos, _ruta_neo4j())
+    def test_propaga_la_pagina_del_paper_de_la_que_sale_la_evidencia(self):
+        with (
+            patch(_P_RUTA, return_value=_RUTA),
+            patch(_P_NODOS, return_value=[]),
+            patch(_P_FRAG, return_value=[_FRAGMENTO]),
+            patch(_P_COSER, return_value=_FRAGMENTO["contenido"]),
+        ):
+            r = RecuperacionService().consultar_cita("doc-1", "c1")
 
-        assert isinstance(resultado, ResultadoRecuperacion)
-        assert resultado.pagina_paper == 3
+        assert r.pagina_paper == 4
+        assert r.chunk_index == 12
 
-    def test_chunk_index_llega_correctamente(self):
-        fragmentos = [_fragmento_chroma(pagina=3, chunk_index=2)]
-        resultado = self._service_con_mocks(fragmentos, _ruta_neo4j())
+    def test_la_busqueda_se_restringe_al_doi_de_la_referencia_citada(self):
+        with (
+            patch(_P_RUTA, return_value=_RUTA),
+            patch(_P_NODOS, return_value=[]),
+            patch(_P_COSER, return_value=""),
+            patch(_P_FRAG, return_value=[_FRAGMENTO]) as buscar,
+        ):
+            RecuperacionService().consultar_cita("doc-1", "c1")
 
-        assert resultado.chunk_index == 2
+        _query, doi_usado, _n = buscar.call_args[0]
+        assert doi_usado == DOI_CHUNKS
 
-    def test_pagina_paper_none_cuando_metadata_sin_campo(self):
-        fragmento_legacy = {
-            "texto": "Texto sin chunks.",
-            "metadata": {"doi": "10.1234/old", "doi_normalizado": "10_1234_old"},
-            "similitud": 0.85,
-        }
-        resultado = self._service_con_mocks([fragmento_legacy], _ruta_neo4j())
+    def test_busca_por_la_aseveracion_del_tesista_cuando_existe(self):
+        aseveracion = "GraphRAG mejora la recuperación en preguntas globales."
+        with (
+            patch(_P_RUTA, return_value=_RUTA),
+            patch(_P_NODOS, return_value=[]),
+            patch(_P_COSER, return_value=""),
+            patch(_P_FRAG, return_value=[_FRAGMENTO]) as buscar,
+        ):
+            RecuperacionService().consultar_cita("doc-1", "c1", fragmento_oracion=aseveracion)
 
-        assert resultado.pagina_paper is None
-        assert resultado.chunk_index is None
+        query = buscar.call_args[0][0]
+        assert query == aseveracion
 
-    def test_similitud_se_preserva(self):
-        fragmentos = [_fragmento_chroma(pagina=1, chunk_index=0, similitud=0.77)]
-        resultado = self._service_con_mocks(fragmentos, _ruta_neo4j())
+    def test_sin_aseveracion_busca_por_el_texto_de_la_cita(self):
+        with (
+            patch(_P_RUTA, return_value=_RUTA),
+            patch(_P_NODOS, return_value=[]),
+            patch(_P_COSER, return_value=""),
+            patch(_P_FRAG, return_value=[_FRAGMENTO]) as buscar,
+        ):
+            RecuperacionService().consultar_cita("doc-1", "c1", fragmento_oracion="   ")
 
-        assert resultado.similitud == 0.77
+        assert buscar.call_args[0][0] == "(Edge et al., 2024)"
 
-    def test_metodo_es_hibrido_cuando_hay_fragmento(self):
-        fragmentos = [_fragmento_chroma(pagina=2, chunk_index=1)]
-        resultado = self._service_con_mocks(fragmentos, _ruta_neo4j())
+    def test_sin_chunks_del_paper_cae_a_solo_grafo_y_sin_evidencia(self):
+        with (
+            patch(_P_RUTA, return_value=_RUTA),
+            patch(_P_NODOS, return_value=[]),
+            patch(_P_FRAG, return_value=[]),
+        ):
+            r = RecuperacionService().consultar_cita("doc-1", "c1")
 
-        assert resultado.metodo == "hibrido"
+        assert r.metodo == "solo_grafo"
+        assert r.fragmento_relevante == ""
+        assert r.similitud == 0.0
+        assert r.referencia_id == "r1"  # la referencia existe, el texto no
 
-    def test_pagina_paper_none_cuando_no_hay_fragmentos(self):
-        resultado = self._service_con_mocks(fragmentos=[], ruta=_ruta_neo4j())
+    def test_una_cita_sin_referencia_vinculada_no_recupera_nada(self):
+        with patch(_P_RUTA, return_value=None):
+            r = RecuperacionService().consultar_cita("doc-1", "c1")
 
-        assert resultado.pagina_paper is None
-        assert resultado.chunk_index is None
-        assert resultado.metodo in ("solo_grafo", "no_encontrado")
+        assert r.metodo == "no_encontrado"
+        assert r.referencia_id is None
+        assert r.fragmento_relevante == ""
 
-    def test_pagina_paper_none_cuando_no_hay_ruta_grafo(self):
-        resultado = self._service_con_mocks(fragmentos=[], ruta=None)
+    def test_una_referencia_sin_doi_no_dispara_busqueda_vectorial(self):
+        ruta_sin_doi = {**_RUTA, "doi": None, "doi_raw": None}
+        with (
+            patch(_P_RUTA, return_value=ruta_sin_doi),
+            patch(_P_NODOS, return_value=[]),
+            patch(_P_FRAG) as buscar,
+        ):
+            r = RecuperacionService().consultar_cita("doc-1", "c1")
 
-        assert resultado.pagina_paper is None
-        assert resultado.metodo == "no_encontrado"
+        buscar.assert_not_called()
+        assert r.metodo == "solo_grafo"
