@@ -10,6 +10,7 @@ import io
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 import openpyxl
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Font, PatternFill, Alignment
 import structlog
 
@@ -489,6 +490,11 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
         def _r(v):
             return round(float(v), 3) if v is not None else None
 
+        def _s(v):
+            # El texto extraído de PDFs puede traer caracteres de control
+            # ilegales para XML; openpyxl revienta al guardar si no se sanean.
+            return ILLEGAL_CHARACTERS_RE.sub("", v) if isinstance(v, str) else v
+
         # ── Estilos compartidos ──────────────────────────────────────────────
         header_fill = PatternFill("solid", fgColor="1E293B")
         header_font = Font(bold=True, color="FFFFFF", size=11)
@@ -635,7 +641,7 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
             }.get(veredicto)
 
             for col_idx, (valor, alineacion) in enumerate(valores, start=1):
-                celda = ws_citas.cell(row=fila_idx, column=col_idx, value=valor)
+                celda = ws_citas.cell(row=fila_idx, column=col_idx, value=_s(valor))
                 celda.alignment = alineacion
                 celda.font = Font(size=10)
                 if row_fill:

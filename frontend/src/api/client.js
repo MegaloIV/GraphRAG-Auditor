@@ -11,8 +11,18 @@ const client = axios.create({
 // a un shape uniforme que las pantallas muestran tal cual.
 client.interceptors.response.use(
   (response) => response,
-  (error) => {
-    const detail = error.response?.data?.detail
+  async (error) => {
+    let data = error.response?.data
+    // En peticiones con responseType: 'blob', el cuerpo del error llega como
+    // Blob; hay que leerlo para recuperar el detail JSON del backend.
+    if (data instanceof Blob) {
+      try {
+        data = JSON.parse(await data.text())
+      } catch {
+        data = null
+      }
+    }
+    const detail = data?.detail
     if (detail && typeof detail === 'object') {
       return Promise.reject({
         codigo: detail.codigo,
