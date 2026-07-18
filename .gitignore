@@ -13,3 +13,4 @@ backend/sql
 .claude/
 env.yaml
 /docs
+backend/venv-wsl/
