@@ -7,6 +7,25 @@ import { EstadoCarga, EstadoVacio, ErrorInline } from '../components/Estados'
 import { auditoriaAPI } from '../api/client'
 import { pct } from '../lib/formato'
 
+const SECCIONES = {
+  resumen: 'resumen',
+  introduccion: 'introducción',
+  trabajos_relacionados: 'trabajos relacionados',
+  metodos: 'métodos',
+  resultados: 'resultados',
+  discusion: 'discusión',
+  conclusion: 'conclusión',
+}
+
+// El juez debe transcribir literalmente del paper y el backend coteja esa
+// transcripción contra el fragmento recuperado. Separar los avisos permite
+// destacarlos: son lo que el revisor tiene que comprobar a mano.
+function partirAvisos(justificacion) {
+  const i = (justificacion || '').indexOf('[')
+  if (i === -1) return [justificacion, null]
+  return [justificacion.slice(0, i).trim(), justificacion.slice(i).replace(/^\[|\]$/g, '')]
+}
+
 function FilaVeredicto({ v }) {
   const [abierto, setAbierto] = useState(false)
   return (
@@ -19,6 +38,11 @@ function FilaVeredicto({ v }) {
         <span className="texto-doc" style={{ flex: 1, minWidth: 160, fontWeight: 600 }}>{v.texto_cita}</span>
         <span className="badge badge-neutro">pág. {v.pagina}</span>
         {v.similitud > 0 && <span className="badge badge-neutro">similitud {pct(v.similitud)}</span>}
+        {v.seccion_evidencia === 'trabajos_relacionados' && (
+          <span className="badge badge-alerta" title="La evidencia sale de la sección donde el paper resume trabajo ajeno.">
+            evidencia de terceros
+          </span>
+        )}
         {abierto ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
       </button>
 
@@ -29,8 +53,49 @@ function FilaVeredicto({ v }) {
               <b style={{ fontFamily: 'var(--font-ui)' }}>Aseveración: </b>“{v.fragmento_oracion}”
             </p>
           )}
-          <p><b>Justificación:</b> {v.justificacion}</p>
+          {(() => {
+            const [texto, aviso] = partirAvisos(v.justificacion)
+            return (
+              <>
+                <p><b>Justificación:</b> {texto}</p>
+                {aviso && (
+                  <p style={{
+                    margin: 0, padding: '8px 12px', borderRadius: 'var(--radius-sm)',
+                    background: 'var(--bg-sunken)', borderLeft: '3px solid var(--warning, #d97706)',
+                    fontSize: 13,
+                  }}>
+                    <b>Revisa a mano: </b>{aviso}
+                  </p>
+                )}
+              </>
+            )
+          })()}
+
+          {v.cita_textual && (
+            <div>
+              <b>Frase del paper que lo sostiene</b>
+              <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>
+                {' '}· verificada literalmente contra el texto recuperado
+                {v.seccion_evidencia && SECCIONES[v.seccion_evidencia]
+                  ? ` · sección: ${SECCIONES[v.seccion_evidencia]}`
+                  : ''}
+              </span>
+              <blockquote
+                className="texto-doc"
+                style={{
+                  margin: '6px 0 0', padding: '10px 14px', background: 'var(--bg-sunken)',
+                  borderLeft: '3px solid var(--ok, #16a34a)', borderRadius: 'var(--radius-sm)',
+                }}
+              >
+                “{v.cita_textual}”
+              </blockquote>
+            </div>
+          )}
           {(v.fragmento_evidencia_es || v.fragmento_evidencia) && (
+            <details>
+              <summary style={{ cursor: 'pointer', fontSize: 13 }}>
+                Ver el pasaje completo recuperado
+              </summary>
             <blockquote
               className="texto-doc"
               style={{ margin: 0, padding: '10px 14px', background: 'var(--bg-sunken)', borderLeft: '3px solid var(--accent)', borderRadius: 'var(--radius-sm)' }}
@@ -42,6 +107,7 @@ function FilaVeredicto({ v }) {
                 {v.fragmento_evidencia_es && <>{' '}· traducido</>}
               </span>
             </blockquote>
+            </details>
           )}
           {v.titulo_referencia && (
             <span style={{ color: 'var(--text-secondary)' }}>

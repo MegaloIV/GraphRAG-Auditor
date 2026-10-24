@@ -81,7 +81,7 @@ class SupabaseVectorService:
 
             if doi_normalizado:
                 sql = """
-                    SELECT id, contenido, pagina, titulo, doi, chunk_index,
+                    SELECT id, contenido, pagina, titulo, doi, chunk_index, seccion,
                            1 - (embedding <=> %s) AS similitud
                     FROM papers_chunks
                     WHERE doi_normalizado = %s
@@ -91,7 +91,7 @@ class SupabaseVectorService:
                 params = (vec, doi_normalizado, vec, top_k)
             else:
                 sql = """
-                    SELECT id, contenido, pagina, titulo, doi, chunk_index,
+                    SELECT id, contenido, pagina, titulo, doi, chunk_index, seccion,
                            1 - (embedding <=> %s) AS similitud
                     FROM papers_chunks
                     ORDER BY embedding <=> %s
@@ -137,22 +137,44 @@ class SupabaseVectorService:
 
     def chunks_son_actuales(self, doi_normalizado: str) -> bool:
         """
-        True si los chunks del DOI usan el chunking nuevo (sub-bloques de
-        ~1100 chars). Los papers indexados con el chunking viejo (páginas
-        enteras) tienen chunks mucho más largos y conviene re-indexarlos.
+        True si los chunks del DOI están al día: usan el chunking de ~1100
+        chars Y llevan la sección del paper. Los indexados antes de cualquiera
+        de las dos cosas devuelven False para que se re-indexen.
         """
         try:
             conn = self._conectar()
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT COALESCE(MAX(LENGTH(contenido)), 0) FROM papers_chunks WHERE doi_normalizado = %s",
+                    "SELECT COALESCE(MAX(LENGTH(contenido)), 0), "
+                    "       COUNT(*) FILTER (WHERE seccion IS NULL) "
+                    "FROM papers_chunks WHERE doi_normalizado = %s",
                     (doi_normalizado,),
                 )
-                maximo = cur.fetchone()[0]
-                return 0 < maximo <= 1600
+                maximo, sin_seccion = cur.fetchone()
+                return 0 < maximo <= 1600 and sin_seccion == 0
         except Exception as e:
             logger.error("error_chunks_son_actuales", doi_normalizado=doi_normalizado, error=str(e))
             return True  # ante la duda, no forzar re-descarga del paper
+
+    def nivel_confianza_indexado(self, doi_normalizado: str) -> str | None:
+        """
+        Con qué calidad de texto se indexó el paper ('texto_completo',
+        'abstract', ...). None si no está indexado. Sirve para no dar por
+        bueno un abstract cuando todavía se puede conseguir el paper entero.
+        """
+        try:
+            conn = self._conectar()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT nivel_confianza FROM papers_chunks "
+                    "WHERE doi_normalizado = %s LIMIT 1",
+                    (doi_normalizado,),
+                )
+                fila = cur.fetchone()
+                return fila[0] if fila else None
+        except Exception as e:
+            logger.error("error_nivel_confianza", doi_normalizado=doi_normalizado, error=str(e))
+            return None
 
     def buscar_por_termino(
         self,
@@ -171,7 +193,7 @@ class SupabaseVectorService:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    SELECT id, contenido, pagina, titulo, doi, chunk_index
+                    SELECT id, contenido, pagina, titulo, doi, chunk_index, seccion
                     FROM papers_chunks
                     WHERE doi_normalizado = %s AND contenido ILIKE %s
                     ORDER BY chunk_index
@@ -183,6 +205,55 @@ class SupabaseVectorService:
         except Exception as e:
             logger.error("error_buscar_por_termino", termino=termino, error=str(e))
             return []
+
+    def total_papers_distintos(self) -> int:
+        """Papers distintos indexados. El índice es por DOI y compartido entre
+        documentos, así que este número es el corpus acumulado."""
+        try:
+            conn = self._conectar()
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(DISTINCT doi_normalizado) FROM papers_chunks")
+                return cur.fetchone()[0]
+        except Exception as e:
+            logger.error("error_total_papers", error=str(e))
+            return 0
+
+    def catalogo_texto_completo(self) -> list[dict]:
+        """
+        Papers de la biblioteca con texto completo: uno por clave, con su
+        título y año. La tabla es compartida entre tesis, así que un paper
+        conseguido para una tesis sirve para cualquier otra que lo cite.
+        """
+        try:
+            conn = self._conectar()
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (doi_normalizado)
+                           doi_normalizado, doi, titulo, anio, nivel_confianza
+                    FROM papers_chunks
+                    WHERE nivel_confianza IN ('texto_completo', 'manual', 'pagina_web')
+                    ORDER BY doi_normalizado
+                    """
+                )
+                return [dict(f) for f in cur.fetchall()]
+        except Exception as e:
+            logger.error("error_catalogo_biblioteca", error=str(e))
+            return []
+
+    def texto_de_paper(self, doi_normalizado: str) -> str:
+        """Texto del paper reconstruido de sus chunks (para copias de respaldo)."""
+        try:
+            conn = self._conectar()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT contenido FROM papers_chunks WHERE doi_normalizado = %s ORDER BY chunk_index",
+                    (doi_normalizado,),
+                )
+                return "\n\n".join(f[0] for f in cur.fetchall() if f[0])
+        except Exception as e:
+            logger.error("error_texto_de_paper", doi_normalizado=doi_normalizado, error=str(e))
+            return ""
 
     def total_chunks(self) -> int:
         """Retorna el total de chunks almacenados."""
@@ -216,12 +287,12 @@ class SupabaseVectorService:
                     INSERT INTO papers_chunks
                         (id, doi, doi_normalizado, titulo, anio, pagina,
                          chunk_index, nivel_confianza, referencia_id,
-                         contenido, embedding)
+                         contenido, seccion, embedding)
                     VALUES
                         (%(id)s, %(doi)s, %(doi_normalizado)s, %(titulo)s,
                          %(anio)s, %(pagina)s, %(chunk_index)s,
                          %(nivel_confianza)s, %(referencia_id)s,
-                         %(contenido)s, %(embedding)s)
+                         %(contenido)s, %(seccion)s, %(embedding)s)
                     ON CONFLICT (id) DO UPDATE SET
                         doi             = EXCLUDED.doi,
                         doi_normalizado = EXCLUDED.doi_normalizado,
@@ -230,6 +301,7 @@ class SupabaseVectorService:
                         pagina          = EXCLUDED.pagina,
                         chunk_index     = EXCLUDED.chunk_index,
                         nivel_confianza = EXCLUDED.nivel_confianza,
+                        seccion = EXCLUDED.seccion,
                         referencia_id   = EXCLUDED.referencia_id,
                         contenido       = EXCLUDED.contenido,
                         embedding       = EXCLUDED.embedding

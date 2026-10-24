@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 import openpyxl
 from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Font, PatternFill, Alignment
+from openpyxl.worksheet.datavalidation import DataValidation
 import structlog
 
 from app.core.config import get_settings
@@ -32,6 +33,29 @@ settings = get_settings()
 router = APIRouter(prefix="/auditoria", tags=["Auditoría"])
 
 
+def _sin_control(registro) -> dict:
+    """Registro de Neo4j como dict, sin caracteres que un .xlsx no admite."""
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+
+    def limpiar(v):
+        if isinstance(v, str):
+            return ILLEGAL_CHARACTERS_RE.sub("", v)
+        if isinstance(v, list):
+            return [limpiar(x) for x in v]
+        return v
+    return {k: limpiar(v) for k, v in dict(registro).items()}
+
+
+def _procedencia_resumen(r) -> str:
+    """'sistema' | 'humano' | '' para una fila de la bibliografía."""
+    nivel = r["nivel_confianza"]
+    if r["procedencia_texto"] == "humano" or r["origen_manual"] or nivel == "manual":
+        return "humano"
+    if r["procedencia_texto"] == "sistema" or nivel in ("texto_completo", "pagina_web"):
+        return "sistema"
+    return ""
+
+
 # ── HU-010: Auditar documento ────────────────────────────────────────────────
 
 @router.post(
@@ -39,15 +63,23 @@ router = APIRouter(prefix="/auditoria", tags=["Auditoría"])
     response_model=AuditoriaResponse,
     summary="HU-010: Auditar todas las citas del documento",
 )
-async def auditar_documento(documento_id: str):
+async def auditar_documento(documento_id: str, solo_pendientes: bool = True):
     """
-    Ejecuta la auditoría semántica completa:
+    Ejecuta la auditoría semántica:
     por cada cita recupera evidencia del grafo + Supabase/pgvector
     y emite un veredicto con gpt-5.4-mini.
     Persiste los veredictos en Neo4j.
+
+    Por defecto solo juzga lo que falta: las citas sin veredicto y aquellas cuya
+    fuente se obtuvo después de la corrida anterior. En un documento recién
+    procesado eso son todas. Con `solo_pendientes=false` se fuerza a reauditar
+    el documento entero, que es lo que hay que hacer si cambia el modelo o el
+    prompt del juez.
     """
     try:
-        veredictos = auditoria_service.auditar_documento(documento_id)
+        veredictos = auditoria_service.auditar_documento(
+            documento_id, solo_pendientes=solo_pendientes
+        )
 
         # Los veredictos nuevos invalidan el análisis de coherencia previo.
         try:
@@ -57,6 +89,17 @@ async def auditar_documento(documento_id: str):
             logger.warning("coherencia_no_invalidada", doc_id=documento_id, error=str(e))
 
         if not veredictos:
+            # Sin nada pendiente no hay error: es el caso normal al repetir la
+            # auditoría sobre un documento que no ha incorporado fuentes nuevas.
+            if solo_pendientes:
+                logger.info("auditoria_sin_pendientes", doc_id=documento_id)
+                return AuditoriaResponse(
+                    documento_id=documento_id,
+                    total_citas=0, supports=0, refutes=0, no_info=0, veredictos=[],
+                    advertencia=("No había citas pendientes: todas conservan el veredicto "
+                                 "emitido sobre la misma fuente. Usa solo_pendientes=false "
+                                 "para reauditar el documento completo."),
+                )
             raise HTTPException(
                 status_code=404,
                 detail={
@@ -113,7 +156,11 @@ async def ver_veredictos(documento_id: str):
     MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
     WHERE c.veredicto IS NOT NULL
     OPTIONAL MATCH (c)-[:CITA_A]->(r:Referencia)
-    OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
+    CALL (r) {
+  OPTIONAL MATCH (r)-[e:ESCRITO_POR]->(a:Autor)
+  WITH a ORDER BY e.orden
+  RETURN collect(a.nombre) AS autores
+}
     RETURN
       c.id            AS cita_id,
       c.texto         AS texto_cita,
@@ -124,6 +171,8 @@ async def ver_veredictos(documento_id: str):
       c.pagina_paper  AS pagina_paper,
       c.fragmento_evidencia    AS fragmento_evidencia,
       c.fragmento_evidencia_es AS fragmento_evidencia_es,
+      c.cita_textual      AS cita_textual,
+      c.seccion_evidencia AS seccion_evidencia,
       c.faithfulness      AS faithfulness,
       c.answer_relevancy  AS answer_relevancy,
       c.context_precision AS context_precision,
@@ -132,7 +181,7 @@ async def ver_veredictos(documento_id: str):
       r.titulo        AS ref_titulo,
       r.anio          AS ref_anio,
       r.doi_verificado AS doi,
-      collect(DISTINCT a.nombre) AS autores
+      autores
     """
     try:
         with neo4j_service.driver.session(database=settings.neo4j_database) as session:
@@ -164,6 +213,8 @@ async def ver_veredictos(documento_id: str):
                 justificacion=r["justificacion"] or "",
                 fragmento_evidencia=r.get("fragmento_evidencia") or "",
                 fragmento_evidencia_es=r.get("fragmento_evidencia_es") or "",
+                cita_textual=r.get("cita_textual") or "",
+                seccion_evidencia=r.get("seccion_evidencia") or "",
                 referencia_id=r["ref_id"],
                 titulo_referencia=r["ref_titulo_oficial"] or r["ref_titulo"],
                 anio_referencia=r["ref_anio"],
@@ -420,9 +471,19 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
     """
     _Q_CITAS_DETALLE = """
     MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
-    OPTIONAL MATCH (c)-[:CITA_A]->(r:Referencia)
-    OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
+    OPTIONAL MATCH (c)-[rel:CITA_A]->(r:Referencia)
+    CALL (r) {
+        OPTIONAL MATCH (r)-[e:ESCRITO_POR]->(a:Autor)
+        WITH a ORDER BY e.orden
+        RETURN collect(a.nombre) AS autores
+    }
     RETURN
+      c.id                 AS cita_id,
+      c.etiqueta_experto   AS etiqueta_experto,
+      c.justificacion_experto AS justificacion_experto,
+      rel.confianza        AS confianza_vinculo,
+      rel.metodo           AS metodo_vinculo,
+      rel.ambigua          AS vinculo_ambiguo,
       c.texto              AS texto_cita,
       c.fragmento          AS fragmento_oracion,
       c.pagina             AS pagina_tesis,
@@ -430,6 +491,13 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
       c.justificacion      AS justificacion,
       c.fragmento_evidencia AS fragmento_paper,
       c.fragmento_evidencia_es AS fragmento_paper_es,
+      c.fragmento_legible  AS fragmento_legible,
+      c.cita_textual       AS cita_textual,
+      c.seccion_evidencia  AS seccion_evidencia,
+      c.contradiccion      AS contradiccion,
+      c.similitud          AS similitud,
+      c.clase_cita         AS clase_cita,
+      c.tipo               AS tipo_cita,
       c.pagina_paper       AS pagina_paper,
       c.faithfulness       AS faithfulness,
       c.answer_relevancy   AS answer_relevancy,
@@ -437,8 +505,49 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
       r.titulo_oficial     AS titulo_oficial,
       r.titulo             AS titulo_referencia,
       r.anio               AS anio_referencia,
-      collect(DISTINCT a.nombre) AS autores
+      r.doi_verificado     AS doi_referencia,
+      r.nivel_confianza    AS nivel_confianza,
+      r.motivo_sin_texto   AS motivo_sin_texto,
+      r.procedencia_texto  AS procedencia_texto,
+      r.origen_texto       AS origen_texto,
+      r.origen_manual      AS origen_manual_ref,
+      autores
     ORDER BY c.pagina
+    """
+
+    # Toda la bibliografía con lo que el sistema averiguó de cada entrada:
+    # identificación, disponibilidad del texto, motivo si no se obtuvo, y
+    # cuántas citas la referencian.
+    _Q_BIBLIOGRAFIA = """
+    MATCH (d:Documento {id: $doc_id})-[:TIENE_REFERENCIA]->(r:Referencia)
+    CALL (r) {
+        OPTIONAL MATCH (r)-[e:ESCRITO_POR]->(a:Autor)
+        WITH a ORDER BY e.orden
+        RETURN collect(a.nombre) AS autores
+    }
+    OPTIONAL MATCH (c:Cita)-[:CITA_A]->(r)
+    OPTIONAL MATCH (r)-[:CITA_EXTERNA]->(x:ReferenciaExterna)
+    RETURN
+      r.id                      AS ref_id,
+      autores,
+      r.anio                    AS anio,
+      r.titulo                  AS titulo,
+      r.titulo_oficial          AS titulo_oficial,
+      r.doi                     AS doi_declarado,
+      r.doi_verificado          AS doi_verificado,
+      r.doi_resuelto_por_titulo AS doi_por_titulo,
+      r.nivel_confianza         AS nivel_confianza,
+      r.motivo_sin_texto        AS motivo_sin_texto,
+      r.origen_manual           AS origen_manual,
+      r.nota_manual             AS nota_manual,
+      r.procedencia_texto       AS procedencia_texto,
+      r.origen_texto            AS origen_texto,
+      coalesce(r.url_texto, r.url_usada, r.url) AS url_texto,
+      r.alerta_referencia       AS alerta_referencia,
+      r.datos_incompletos       AS datos_incompletos,
+      count(DISTINCT c)         AS veces_citada,
+      count(DISTINCT x)         AS refs_externas
+    ORDER BY toLower(coalesce(r.titulo, ''))
     """
 
     _Q_REFERENCIAS = """
@@ -471,11 +580,28 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
 
     try:
         with neo4j_service.driver.session(database=settings.neo4j_database) as session:
-            citas_raw   = list(session.run(_Q_CITAS_DETALLE, doc_id=documento_id))
+            # El texto de los PDF arrastra caracteres de control (restos de
+            # glifos: \x14, \x15…) que openpyxl rechaza; uno solo en un
+            # fragmento de evidencia tumbaba el informe entero.
+            citas_raw   = [_sin_control(r) for r in session.run(_Q_CITAS_DETALLE, doc_id=documento_id)]
+            biblio_raw  = [_sin_control(r) for r in session.run(_Q_BIBLIOGRAFIA, doc_id=documento_id)]
             refs_raw    = session.run(_Q_REFERENCIAS, doc_id=documento_id).single()
+            doc_raw     = session.run(
+                "MATCH (d:Documento {id: $doc_id}) "
+                "RETURN d.titulo AS titulo, d.nombre_archivo AS nombre",
+                doc_id=documento_id,
+            ).single()
             sin_citar   = session.run(_Q_REFS_SIN_CITAR, doc_id=documento_id).single()
             sin_ref     = session.run(_Q_CITAS_SIN_REF, doc_id=documento_id).single()
             ragas_prom  = session.run(_Q_RAGAS_PROMEDIO, doc_id=documento_id).single()
+
+        # Título de la tesis para la columna de la plantilla: el nombre del
+        # archivo sin la extensión es lo más cercano que tiene el sistema.
+        nombre_documento = (
+            (doc_raw["titulo"] or doc_raw["nombre"]) if doc_raw else ""
+        ) or documento_id
+        if nombre_documento.lower().endswith(".pdf"):
+            nombre_documento = nombre_documento[:-4]
 
         if not citas_raw:
             raise HTTPException(
@@ -541,11 +667,21 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
         fila = 4
         fila = _escribir_seccion(ws_res, fila, "REFERENCIAS")
         total_refs = refs_raw["total_referencias"] if refs_raw else 0
-        con_texto  = refs_raw["con_texto"] if refs_raw else 0
+        # «Con texto» contaba antes toda referencia verificada, incluidas las
+        # que solo tienen resumen o ningún texto: el informe inflaba la
+        # cobertura. Se desglosa lo que el juez puede usar de verdad.
+        # Qué parte del texto completo logró el sistema solo y qué parte exigió
+        # buscar y subir el paper a mano: son las dos versiones del informe.
+        _proc = [_procedencia_resumen(r) for r in biblio_raw]
+        con_completo = _proc.count("sistema") + _proc.count("humano")
+        solo_resumen = sum(1 for r in biblio_raw if r["nivel_confianza"] == "abstract")
         fila = _escribir_fila(ws_res, fila, "Total referencias bibliográficas", total_refs)
-        fila = _escribir_fila(ws_res, fila, "Referencias con texto disponible", con_texto)
-        fila = _escribir_fila(ws_res, fila, "Referencias no encontradas", total_refs - con_texto)
-        fila = _escribir_fila(ws_res, fila, "Referencias sin citar en el texto", sin_citar["total"] if sin_citar else 0)
+        fila = _escribir_fila(ws_res, fila, "Referencias con texto completo", con_completo)
+        fila = _escribir_fila(ws_res, fila, "  · conseguido por el sistema", _proc.count("sistema"))
+        fila = _escribir_fila(ws_res, fila, "  · aportado por intervención humana", _proc.count("humano"))
+        fila = _escribir_fila(ws_res, fila, "Referencias solo con resumen (abstract)", solo_resumen)
+        fila = _escribir_fila(ws_res, fila, "Referencias sin texto", total_refs - con_completo - solo_resumen)
+        fila = _escribir_fila(ws_res, fila, "Referencias sin citar en las secciones auditadas", sin_citar["total"] if sin_citar else 0)
 
         fila += 1
         fila = _escribir_seccion(ws_res, fila, "CITAS")
@@ -560,6 +696,46 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
         fila = _escribir_fila(ws_res, fila, "Citas refutadas por su fuente", refutes_cnt)
         fila = _escribir_fila(ws_res, fila, "Citas sin evidencia verificable", no_info_cnt)
 
+        # «Sin evidencia verificable» no es un solo fenómeno: mezcla las citas
+        # que el juez leyó contra la fuente completa y no encontró respaldo con
+        # aquellas cuya fuente nunca se consiguió. Sin separarlas se le atribuye
+        # al tesista lo que en realidad es falta de acceso al documento.
+        def _estado_fuente(r) -> str:
+            nivel = (r["nivel_confianza"] or "").strip()
+            if not nivel:
+                return "sin_referencia"
+            if nivel == "texto_completo":
+                return "texto_completo"
+            if nivel in ("abstract", "pagina_web"):
+                return "texto_parcial"
+            return "sin_texto"
+
+        estados = [(_estado_fuente(r), r["veredicto"]) for r in citas_raw]
+        _n = lambda est, ver=None: sum(
+            1 for e, v in estados if e == est and (ver is None or v == ver)
+        )
+        fila = _escribir_fila(ws_res, fila, "  · con el texto completo de la fuente",
+                              _n("texto_completo", "NO_INFO"))
+        fila = _escribir_fila(ws_res, fila, "  · con solo resumen o página web",
+                              _n("texto_parcial", "NO_INFO"))
+        fila = _escribir_fila(ws_res, fila, "  · sin texto de la fuente",
+                              _n("sin_texto", "NO_INFO"))
+        fila = _escribir_fila(ws_res, fila, "  · sin referencia enlazada",
+                              _n("sin_referencia", "NO_INFO"))
+
+        fila += 1
+        fila = _escribir_seccion(ws_res, fila, "CITAS VERIFICADAS CONTRA EL TEXTO COMPLETO")
+        completo = _n("texto_completo")
+        fila = _escribir_fila(ws_res, fila, "Citas con el texto completo de su fuente", completo)
+        fila = _escribir_fila(ws_res, fila, "  · respaldadas (SUPPORTS)", _n("texto_completo", "SUPPORTS"))
+        fila = _escribir_fila(ws_res, fila, "  · refutadas (REFUTES)", _n("texto_completo", "REFUTES"))
+        fila = _escribir_fila(ws_res, fila, "  · sin información suficiente (NO INFO)",
+                              _n("texto_completo", "NO_INFO"))
+        fila = _escribir_fila(
+            ws_res, fila, "Cobertura de auditoría",
+            f"{completo / total_citas:.1%}" if total_citas else "—",
+        )
+
         # Métricas RAGAS: solo en la exportación de administración (D9).
         if incluir_ragas:
             fila += 1
@@ -567,88 +743,319 @@ async def exportar_metricas_excel(documento_id: str, incluir_ragas: bool = False
             if total_ev:
                 fila = _escribir_seccion(ws_res, fila, "MÉTRICAS RAGAS (uso interno)")
                 fila = _escribir_fila(ws_res, fila, "Citas evaluadas con RAGAS", int(total_ev))
-                fila = _escribir_fila(ws_res, fila, "Faithfulness (promedio)", _r(ragas_prom["faithfulness_avg"]))
-                fila = _escribir_fila(ws_res, fila, "Answer Relevancy (promedio)", _r(ragas_prom["relevancy_avg"]))
                 fila = _escribir_fila(ws_res, fila, "Context Precision (promedio)", _r(ragas_prom["precision_avg"]))
 
         ws_res.column_dimensions["A"].width = 42
         ws_res.column_dimensions["B"].width = 16
 
         # ── Hoja 2: Citas ────────────────────────────────────────────────────
-        ws_citas = wb.create_sheet("Citas")
 
-        VEREDICTO_LEGIBLE = {
-            "SUPPORTS": "Respaldada",
-            "REFUTES": "Refutada",
-            "NO_INFO": "Sin evidencia",
-        }
+        # ── Hoja "Auditoría": el formato de revisión, una fila por cita ──────
+        # Replica exactamente la plantilla que usa el equipo evaluador, para
+        # que las filas se puedan pegar sin retocar nada. Las columnas propias
+        # del sistema van DESPUÉS de las suyas, para no romper ese pegado.
+        from app.services.externo.unpaywall_service import describir_motivo
 
-        encabezados = [
-            ("Cita APA", 22),
-            ("Afirmación del tesista", 48),
-            ("Veredicto", 15),
-            ("Justificación", 48),
-            ("Fragmento del paper (evidencia)", 55),
-            ("Fuente (paper)", 40),
+        def _procedencia(nivel, procedencia, manual) -> str:
+            """Quién consiguió el texto de la fuente: el sistema por su cuenta
+            o una persona que lo buscó y lo subió. El informe v1 (solo sistema)
+            y el v2 (con intervención humana) se distinguen por esta columna."""
+            if procedencia == "humano" or manual or nivel == "manual":
+                return "Intervención humana"
+            if procedencia == "sistema" or nivel in ("texto_completo", "pagina_web", "abstract"):
+                return "Sistema (automático)"
+            return ""
+
+        ws_aud = wb.create_sheet("Auditoría", 1)
+        cols_plantilla = [
+            ("N°", 6),
+            ("TESIS\n(Título)", 38),
+            ("REFERENCIA CITADA\n(Autor, Año)", 40),
+            ("AFIRMACIÓN DEL TESISTA\n(Texto extraído de la tesis)", 55),
+            ("FRAGMENTO DEL PAPER\n(Texto original — es lo que evaluó el LLM)", 60),
+            ("CLASIFICACIÓN\n(SUPPORTS / REFUTES / NO INFO)", 18),
+            ("JUSTIFICACIÓN\n(Motivo de la clasificación)", 55),
+            ("NOMBRE EVALUADOR", 20),
+        ]
+        # Agrupadas por bloques: primero lo que sostiene el veredicto, luego
+        # dónde está cada cosa, después cómo se vinculó la cita y por último
+        # el estado de la fuente. Sueltas y sin orden no se leen.
+        # Solo la evidencia que acompaña al veredicto. Lo diagnóstico —
+        # similitudes, método de vínculo, estado de la fuente— vive en la hoja
+        # "Detalle técnico": mezclarlo aquí convertía la hoja en algo
+        # inmanejable de leer.
+        cols_sistema = [
+            ("Fragmento en español (legible)", 60),
+            ("Frase literal que sostiene el veredicto", 55),
+            ("Qué afirma la fuente (solo REFUTES)", 50),
             ("Pág. tesis", 10),
             ("Pág. paper", 10),
+            ("Procedencia del paper", 22),
         ]
-        if incluir_ragas:
-            encabezados += [("Faithfulness", 13), ("Answer Relevancy", 15), ("Context Precision", 15)]
-
-        for col_idx, (titulo, ancho) in enumerate(encabezados, start=1):
-            c = ws_citas.cell(row=1, column=col_idx, value=titulo)
+        for i, (titulo, ancho) in enumerate(cols_plantilla + cols_sistema, start=1):
+            c = ws_aud.cell(row=1, column=i, value=titulo)
             c.fill = header_fill
             c.font = header_font
-            c.alignment = header_align
-            ws_citas.column_dimensions[c.column_letter].width = ancho
-        ws_citas.row_dimensions[1].height = 30
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws_aud.column_dimensions[c.column_letter].width = ancho
+        ws_aud.row_dimensions[1].height = 34
+        ws_aud.freeze_panes = "A2"
 
-        from app.core.texto import limpiar_fragmento
+        etiqueta_seccion = {
+            "resumen": "resumen", "introduccion": "introducción",
+            "trabajos_relacionados": "trabajos relacionados", "metodos": "métodos",
+            "resultados": "resultados", "discusion": "discusión",
+            "conclusion": "conclusión", "otro": "no identificada",
+        }
 
-        for fila_idx, reg in enumerate(citas_raw, start=2):
-            titulo_paper = reg["titulo_oficial"] or reg["titulo_referencia"] or ""
-            # Fuente legible: "Autor1; Autor2 (año). Título" — identifica el
-            # paper sin tener que cruzar con la hoja de referencias.
-            autores = [a for a in (reg["autores"] or []) if a]
-            fuente = titulo_paper
-            if autores:
-                lista_autores = "; ".join(autores[:3]) + (" et al." if len(autores) > 3 else "")
-                fuente = f"{lista_autores} ({reg['anio_referencia'] or 's.f.'}). {titulo_paper}"
-            veredicto = reg["veredicto"] or ""
-            valores = [
-                (reg["texto_cita"] or "", wrap),
-                (limpiar_fragmento(reg["fragmento_oracion"] or ""), wrap),
-                (VEREDICTO_LEGIBLE.get(veredicto, "Sin auditar"), center),
-                (reg["justificacion"] or "", wrap),
-                # Se muestra la traducción al español si existe; si no, el original.
-                (limpiar_fragmento(reg["fragmento_paper_es"] or reg["fragmento_paper"] or ""), wrap),
-                (fuente, wrap),
-                (reg["pagina_tesis"] or "", center),
-                (reg["pagina_paper"] or "", center),
+        for n, r in enumerate(citas_raw, start=1):
+            autores = r["autores"] or []
+            apellido = autores[0].split(",")[0] if autores else ""
+            titulo_fuente = r["titulo_oficial"] or r["titulo_referencia"] or ""
+            # Misma forma que usa la plantilla: la cita y, a continuación, el
+            # título del paper.
+            referencia = f"{r['texto_cita']} {titulo_fuente}".strip()
+            original = r["fragmento_paper"] or ""
+
+            fila = [
+                n,
+                nombre_documento,
+                referencia,
+                r["fragmento_oracion"] or "",
+                original,
+                (r["veredicto"] or "").replace("NO_INFO", "NO INFO"),
+                r["justificacion"] or "",
+                "Sistema GraphRAG Auditor",
+                r["fragmento_legible"] or r["fragmento_paper_es"] or "",
+                r["cita_textual"] or "",
+                r["contradiccion"] or "",
+                r["pagina_tesis"] or "",
+                r["pagina_paper"] if r["pagina_paper"] is not None else "",
+                _procedencia(r["nivel_confianza"], r["procedencia_texto"], r["origen_manual_ref"]),
+            ]
+            for col, valor in enumerate(fila, start=1):
+                celda = ws_aud.cell(row=n + 1, column=col, value=valor)
+                celda.alignment = Alignment(vertical="top", wrap_text=col > 1)
+            ws_aud.cell(row=n + 1, column=6).fill = {
+                "SUPPORTS": FILL_SUPPORTS, "REFUTES": FILL_REFUTES,
+            }.get(r["veredicto"], FILL_NO_INFO)
+
+        ws_aud.auto_filter.ref = (
+            f"A1:{ws_aud.cell(row=1, column=len(cols_plantilla) + len(cols_sistema)).column_letter}"
+            f"{max(len(citas_raw) + 1, 2)}"
+        )
+
+        # ── Hoja "Revisión" ─────────────────────────────────────────────────
+        # Es la hoja que el experto rellena y que vuelve al sistema. Lleva solo
+        # lo imprescindible para decidir —la afirmación, la evidencia y lo que
+        # dictaminó el sistema— porque pedirle a un revisor que marque una
+        # casilla navegando veinte columnas es garantía de que no lo haga.
+        ws_rev = wb.create_sheet("Revisión", 1)
+        cols_rev = [
+            ("N°", 6),
+            ("CITA", 26),
+            ("AFIRMACIÓN DEL TESISTA", 58),
+            ("EVIDENCIA DEL PAPER\n(en español)", 62),
+            ("FRASE LITERAL DEL PAPER", 50),
+            ("VEREDICTO DEL SISTEMA", 18),
+            ("JUSTIFICACIÓN DEL SISTEMA", 55),
+            ("TU VEREDICTO\n(elige de la lista)", 22),
+            ("TU JUSTIFICACIÓN\n(por qué discrepas o confirmas)", 55),
+            ("cita_id (no modificar)", 38),
+        ]
+        for i, (titulo, ancho) in enumerate(cols_rev, start=1):
+            c = ws_rev.cell(row=1, column=i, value=titulo)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws_rev.column_dimensions[c.column_letter].width = ancho
+        ws_rev.row_dimensions[1].height = 34
+        # Congelar hasta la justificación del sistema: al desplazarse a la
+        # derecha para escribir, el revisor sigue viendo qué está juzgando.
+        ws_rev.freeze_panes = "H2"
+
+        relleno_revisar = PatternFill("solid", fgColor="FEF9C3")
+        for n, r in enumerate(citas_raw, start=1):
+            fila = [
+                n,
+                r["texto_cita"] or "",
+                r["fragmento_oracion"] or "",
+                r["fragmento_legible"] or r["fragmento_paper_es"] or r["fragmento_paper"] or "",
+                r["cita_textual"] or "",
+                (r["veredicto"] or "").replace("NO_INFO", "NO INFO"),
+                r["justificacion"] or "",
+                (r["etiqueta_experto"] or "").replace("NO_INFO", "NO INFO"),
+                r["justificacion_experto"] or "",
+                r["cita_id"],
+            ]
+            for col, valor in enumerate(fila, start=1):
+                celda = ws_rev.cell(row=n + 1, column=col, value=valor)
+                celda.alignment = Alignment(vertical="top", wrap_text=col in (2, 3, 4, 5, 7, 9))
+            ws_rev.cell(row=n + 1, column=6).fill = {
+                "SUPPORTS": FILL_SUPPORTS, "REFUTES": FILL_REFUTES,
+            }.get(r["veredicto"], FILL_NO_INFO)
+            # Las dos columnas a rellenar, resaltadas.
+            for col in (8, 9):
+                ws_rev.cell(row=n + 1, column=col).fill = relleno_revisar
+
+        # Desplegable: evita erratas que luego romperían el emparejamiento.
+        validacion = DataValidation(
+            type="list", formula1='"SUPPORTS,REFUTES,NO INFO"',
+            allow_blank=True, showDropDown=False,
+        )
+        validacion.error = "Usa SUPPORTS, REFUTES o NO INFO."
+        validacion.errorTitle = "Valor no válido"
+        ws_rev.add_data_validation(validacion)
+        validacion.add(f"H2:H{max(len(citas_raw) + 1, 2)}")
+        ws_rev.auto_filter.ref = f"A1:J{max(len(citas_raw) + 1, 2)}"
+
+        # ── Hoja "Detalle técnico" ──────────────────────────────────────────
+        # Para diagnosticar cuando un veredicto no cuadra: de dónde salió la
+        # evidencia, cómo se emparejó la cita y en qué estado está la fuente.
+        ws_det = wb.create_sheet("Detalle técnico")
+        cols_det = [
+            ("N°", 6), ("Cita", 26), ("Similitud", 11), ("Sección del paper", 18),
+            ("Tipo de cita", 14), ("Clase de cita", 22), ("Vínculo: método", 24),
+            ("Vínculo: confianza", 16), ("Vínculo ambiguo", 15),
+            ("DOI de la fuente", 30), ("Disponibilidad del paper", 18),
+            ("Motivo si no hay texto", 50),
+            ("Procedencia del paper", 20), ("Fuente del texto", 18),
+            ("cita_id", 38),
+        ]
+        if incluir_ragas:
+            cols_det.append(("RAGAS: pertinencia del fragmento", 22))
+        for i, (titulo, ancho) in enumerate(cols_det, start=1):
+            c = ws_det.cell(row=1, column=i, value=titulo)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws_det.column_dimensions[c.column_letter].width = ancho
+        ws_det.freeze_panes = "A2"
+
+        for n, r in enumerate(citas_raw, start=1):
+            fila = [
+                n, r["texto_cita"] or "",
+                round(r["similitud"], 3) if r["similitud"] else "",
+                etiqueta_seccion.get(r["seccion_evidencia"] or "", ""),
+                r["tipo_cita"] or "", r["clase_cita"] or "",
+                r["metodo_vinculo"] or "",
+                r["confianza_vinculo"] if r["confianza_vinculo"] else "",
+                "sí" if r["vinculo_ambiguo"] else "",
+                r["doi_referencia"] or "", r["nivel_confianza"] or "",
+                describir_motivo(r["motivo_sin_texto"]),
+                _procedencia(r["nivel_confianza"], r["procedencia_texto"], r["origen_manual_ref"]),
+                r["origen_texto"] or "",
+                r["cita_id"],
             ]
             if incluir_ragas:
-                valores += [
-                    (_r(reg["faithfulness"]), center),
-                    (_r(reg["answer_relevancy"]), center),
-                    (_r(reg["context_precision"]), center),
-                ]
+                fila.append(r["context_precision"])
+            for col, valor in enumerate(fila, start=1):
+                ws_det.cell(row=n + 1, column=col, value=valor).alignment = Alignment(
+                    vertical="top", wrap_text=col in (2, 12)
+                )
+        ws_det.auto_filter.ref = (
+            f"A1:{ws_det.cell(row=1, column=len(cols_det)).column_letter}"
+            f"{max(len(citas_raw) + 1, 2)}"
+        )
 
-            row_fill = {
-                "SUPPORTS": FILL_SUPPORTS,
-                "REFUTES": FILL_REFUTES,
-                "NO_INFO": FILL_NO_INFO,
-            }.get(veredicto)
+        # ── Hoja "Bibliografía" ─────────────────────────────────────────────
+        ws_bib = wb.create_sheet("Bibliografía")
+        cols_bib = [
+            ("N°", 6), ("Autores (en orden)", 42), ("Año", 8),
+            ("Título en la tesis", 55), ("Título oficial (CrossRef)", 55),
+            ("DOI declarado en la tesis", 30), ("DOI verificado", 30),
+            ("DOI resuelto por título", 18), ("Disponibilidad", 18),
+            ("Motivo si no hay texto", 55),
+            ("Procedencia del texto", 20), ("Nota", 55),
+            ("Veces citada", 12),
+            ("Referencias del paper en el grafo", 16), ("Datos incompletos", 16),
+            ("Fuente del texto", 18), ("URL usada", 45), ("Alerta sobre la referencia", 55),
+        ]
+        for i, (titulo, ancho) in enumerate(cols_bib, start=1):
+            c = ws_bib.cell(row=1, column=i, value=titulo)
+            c.fill = header_fill
+            c.font = header_font
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            ws_bib.column_dimensions[c.column_letter].width = ancho
+        ws_bib.freeze_panes = "A2"
 
-            for col_idx, (valor, alineacion) in enumerate(valores, start=1):
-                celda = ws_citas.cell(row=fila_idx, column=col_idx, value=_s(valor))
-                celda.alignment = alineacion
-                celda.font = Font(size=10)
-                if row_fill:
-                    celda.fill = row_fill
+        for n, r in enumerate(biblio_raw, start=1):
+            fila = [
+                n,
+                "; ".join(r["autores"] or []),
+                r["anio"] or "",
+                r["titulo"] or "",
+                r["titulo_oficial"] or "",
+                r["doi_declarado"] or "",
+                r["doi_verificado"] or "",
+                "sí (confirmar)" if r["doi_por_titulo"] else "",
+                r["nivel_confianza"] or "no verificada",
+                describir_motivo(r["motivo_sin_texto"]),
+                _procedencia(r["nivel_confianza"], r["procedencia_texto"], r["origen_manual"]),
+                r["nota_manual"] or "",
+                r["veces_citada"],
+                r["refs_externas"],
+                "sí" if r["datos_incompletos"] else "",
+                r["origen_texto"] or "",
+                r["url_texto"] or "",
+                describir_motivo(r["alerta_referencia"]),
+            ]
+            for col, valor in enumerate(fila, start=1):
+                celda = ws_bib.cell(row=n + 1, column=col, value=valor)
+                celda.alignment = Alignment(vertical="top", wrap_text=col in (2, 4, 5, 10, 17, 18))
+            if not r["veces_citada"]:
+                ws_bib.cell(row=n + 1, column=13).fill = FILL_REFUTES
+        ws_bib.auto_filter.ref = f"A1:{ws_bib.cell(row=1, column=len(cols_bib)).column_letter}{max(len(biblio_raw) + 1, 2)}"
 
-        ws_citas.freeze_panes = "A2"
-        ws_citas.auto_filter.ref = f"A1:{ws_citas.cell(row=1, column=len(encabezados)).column_letter}{max(len(citas_raw) + 1, 2)}"
+        # ── Hoja "Alertas" ──────────────────────────────────────────────────
+        ws_al = wb.create_sheet("Alertas")
+        for i, (titulo, ancho) in enumerate(
+            [("Tipo", 30), ("Elemento", 70), ("Detalle", 70)], start=1
+        ):
+            c = ws_al.cell(row=1, column=i, value=titulo)
+            c.fill = header_fill
+            c.font = header_font
+            ws_al.column_dimensions[c.column_letter].width = ancho
+        ws_al.freeze_panes = "A2"
+
+        alertas: list[tuple[str, str, str]] = []
+        for r in citas_raw:
+            if not r["titulo_referencia"] and not r["titulo_oficial"]:
+                alertas.append((
+                    "Cita sin referencia", r["texto_cita"] or "",
+                    f"Página {r['pagina_tesis'] or '?'} de la tesis. "
+                    "No hay una entrada en la bibliografía que le corresponda.",
+                ))
+            if r["vinculo_ambiguo"]:
+                alertas.append((
+                    "Vinculación ambigua", r["texto_cita"] or "",
+                    "Más de una referencia encaja igual de bien. Confirma cuál es.",
+                ))
+        for r in biblio_raw:
+            if not r["veces_citada"]:
+                alertas.append((
+                    "Referencia nunca citada", r["titulo"] or "",
+                    "Está en la bibliografía pero no se cita en las secciones auditadas. "
+                    "Puede citarse solo en metodología, resultados o conclusiones, que no se auditan.",
+                ))
+            if r["alerta_referencia"] in ("doi_no_corresponde", "url_rota", "url_generica"):
+                alertas.append((
+                    {"doi_no_corresponde": "DOI de otro trabajo", "url_rota": "URL rota",
+                     "url_generica": "URL genérica"}[r["alerta_referencia"]],
+                    r["titulo"] or "",
+                    describir_motivo(r["alerta_referencia"])
+                    + (f" URL: {r['url_texto']}" if r["url_texto"] and r["alerta_referencia"] != "doi_no_corresponde" else "")
+                    + (f" DOI escrito: {r['doi_declarado']}" if r["alerta_referencia"] == "doi_no_corresponde" else ""),
+                ))
+            if r["motivo_sin_texto"] == "doi_inexistente":
+                alertas.append((
+                    "DOI inexistente", r["titulo"] or "",
+                    describir_motivo(r["motivo_sin_texto"]),
+                ))
+        for n, (tipo, elemento, detalle) in enumerate(alertas, start=2):
+            ws_al.cell(row=n, column=1, value=tipo)
+            ws_al.cell(row=n, column=2, value=elemento).alignment = Alignment(wrap_text=True, vertical="top")
+            ws_al.cell(row=n, column=3, value=detalle).alignment = Alignment(wrap_text=True, vertical="top")
 
         buffer = io.BytesIO()
         wb.save(buffer)

@@ -84,6 +84,15 @@ class ResultadoRecuperacion:
     metodo: str                    # "hibrido" | "solo_grafo" | "solo_vectorial" | "no_encontrado"
     pagina_paper: Optional[int] = None   # página del chunk recuperado (None si indexado sin chunks)
     chunk_index: Optional[int] = None    # índice 0-based del chunk recuperado
+    anclas_lexicas: int = 0              # cifras del claim halladas por término exacto
+    # Sección del paper de donde salió la evidencia. "trabajos_relacionados"
+    # significa que el pasaje es la fuente resumiendo trabajo ajeno.
+    seccion_evidencia: str = ""
+    # Cuando la evidencia NO viene del paper citado sino de un vecino del
+    # grafo: qué referencia la aportó y por qué arista se llegó a ella.
+    referencia_evidencia_id: Optional[str] = None
+    titulo_evidencia: str = ""
+    via_grafo: str = ""
 
 
 @dataclass
@@ -100,7 +109,11 @@ class EstadoMotor:
 _Q_RUTA_EVIDENCIA = """
 MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita {id: $cita_id})
 OPTIONAL MATCH (c)-[rel:CITA_A]->(r:Referencia)
-OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
+CALL (r) {
+  OPTIONAL MATCH (r)-[e:ESCRITO_POR]->(a:Autor)
+  WITH a ORDER BY e.orden
+  RETURN collect(a.nombre) AS autores
+}
 RETURN
   c.id       AS cita_id,
   c.texto    AS texto_cita,
@@ -109,8 +122,13 @@ RETURN
   r.anio     AS ref_anio,
   r.doi_verificado AS doi,
   r.doi      AS doi_raw,
-  collect(DISTINCT a.nombre) AS autores,
+  autores,
+  c.consulta_en AS consulta_en,
   rel.confianza AS confianza_vinculo
+"""
+
+_Q_GUARDAR_CONSULTA_EN = """
+MATCH (c:Cita {id: $cita_id}) SET c.consulta_en = $consulta_en
 """
 
 _Q_CITAS_VINCULADAS_COUNT = """
@@ -128,6 +146,65 @@ MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
 RETURN c.id AS cita_id, c.texto AS texto_cita
 """
 
+
+# ── Expansión por el grafo ───────────────────────────────────────────────────
+# Cuando el paper citado no tiene ningún pasaje que sostenga la afirmación —o
+# ni siquiera se pudo descargar— la búsqueda filtrada por DOI se queda sin
+# nada y la cita muere en NO_INFO. Sobre tres tesis reales eso ocurrió 152
+# veces teniendo la referencia perfectamente identificada.
+#
+# El grafo permite seguir buscando en los papers VECINOS de la bibliografía, y
+# distinguir dos situaciones que hoy se confunden en el mismo NO_INFO:
+#   - la afirmación está en otra fuente que el tesista también cita
+#     (probable confusión de referencia), y
+#   - la afirmación no está en ninguna.
+#
+# Lo que se encuentre así NO es una verificación: el pasaje viene de un paper
+# distinto al citado. Se devuelve con metodo="vecino_grafo" para que la
+# auditoría no lo confunda jamás con un respaldo.
+
+_Q_VECINOS_POR_AUTOR = """
+MATCH (d:Documento {id: $doc_id})-[:TIENE_REFERENCIA]->(origen:Referencia {id: $ref_id})
+MATCH (origen)-[:ESCRITO_POR]->(a:Autor)<-[:ESCRITO_POR]-(vecina:Referencia)
+MATCH (d)-[:TIENE_REFERENCIA]->(vecina)
+WHERE vecina.id <> origen.id AND coalesce(vecina.doi_verificado, '') <> ''
+RETURN DISTINCT vecina.id AS ref_id, vecina.doi_verificado AS doi,
+       vecina.titulo AS titulo, 'autor_compartido' AS via
+LIMIT $limite
+"""
+
+# El paper citado cita a X, y X está en la bibliografía de la tesis: es el
+# vecino más pertinente de todos, porque es la fuente primaria declarada.
+_Q_VECINOS_POR_CITA_EXTERNA = """
+MATCH (d:Documento {id: $doc_id})-[:TIENE_REFERENCIA]->(origen:Referencia {id: $ref_id})
+MATCH (origen)-[:CITA_EXTERNA]->(x:ReferenciaExterna)
+WHERE coalesce(x.doi, '') <> ''
+MATCH (d)-[:TIENE_REFERENCIA]->(vecina:Referencia)
+WHERE toLower(coalesce(vecina.doi_verificado, vecina.doi, '')) = toLower(x.doi)
+  AND vecina.id <> origen.id
+RETURN DISTINCT vecina.id AS ref_id, vecina.doi_verificado AS doi,
+       vecina.titulo AS titulo, 'citada_por_la_fuente' AS via
+LIMIT $limite
+"""
+
+# Conceptos: los deja el módulo de coherencia. Si nunca se ejecutó, no hay
+# nodos y la consulta devuelve vacío sin romper nada.
+_Q_VECINOS_POR_CONCEPTO = """
+MATCH (d:Documento {id: $doc_id})-[:TIENE_REFERENCIA]->(origen:Referencia {id: $ref_id})
+MATCH (e1:Evidencia {ref_id: origen.id})-[:MENCIONA]->(k:Concepto)<-[:MENCIONA]-(e2:Evidencia)
+MATCH (d)-[:TIENE_REFERENCIA]->(vecina:Referencia {id: e2.ref_id})
+WHERE vecina.id <> origen.id AND coalesce(vecina.doi_verificado, '') <> ''
+RETURN DISTINCT vecina.id AS ref_id, vecina.doi_verificado AS doi,
+       vecina.titulo AS titulo, 'concepto_compartido' AS via
+LIMIT $limite
+"""
+
+_MAX_VECINOS = 6
+
+# Umbral para aceptar evidencia de un paper distinto al citado. Es más
+# exigente que el de la búsqueda normal: apuntar a la fuente equivocada
+# confunde más que no decir nada.
+_UMBRAL_VECINO = 0.62
 
 class RecuperacionService:
 
@@ -237,7 +314,11 @@ class RecuperacionService:
         if doi and texto_cita:
             doi_normalizado = doi.replace("/", "_").replace(".", "_")
             query = fragmento_oracion.strip() or texto_cita
-            fragmentos = self._buscar_fragmentos(query, doi_normalizado, n_fragmentos)
+            fragmentos, traduccion, anclas = self._buscar_fragmentos(
+                query, doi_normalizado, n_fragmentos, traduccion=ruta.get("consulta_en")
+            )
+            if traduccion and traduccion != ruta.get("consulta_en"):
+                self._guardar_consulta_en(cita_id, traduccion)
 
             if fragmentos:
                 mejor = fragmentos[0]
@@ -267,6 +348,37 @@ class RecuperacionService:
                     metodo="hibrido",
                     pagina_paper=pagina_paper,
                     chunk_index=chunk_index,
+                    anclas_lexicas=anclas,
+                    seccion_evidencia=mejor.get("seccion") or "",
+                )
+
+        # El paper citado no dio nada (o no está indexado): se expande por el
+        # grafo a los vecinos de la propia bibliografía. Lo que se encuentre
+        # así NO verifica la cita —viene de otro paper— pero distingue "la
+        # afirmación está en otra fuente tuya" de "no está en ninguna".
+        if ref_id and texto_cita:
+            hallazgo = self._buscar_en_vecinos(
+                documento_id, ref_id,
+                fragmento_oracion.strip() or texto_cita,
+                ruta.get("consulta_en"), n_fragmentos,
+            )
+            if hallazgo:
+                mejor, vecino = hallazgo
+                return ResultadoRecuperacion(
+                    cita_id=cita_id,
+                    texto_cita=texto_cita,
+                    fragmento_relevante=limpiar_fragmento(mejor["contenido"]),
+                    similitud=float(mejor["similitud"]),
+                    nodos_grafo=nodos,
+                    doi_referencia=doi,
+                    referencia_id=ref_id,
+                    metodo="vecino_grafo",
+                    pagina_paper=mejor.get("pagina"),
+                    chunk_index=mejor.get("chunk_index"),
+                    seccion_evidencia=mejor.get("seccion") or "",
+                    referencia_evidencia_id=vecino["ref_id"],
+                    titulo_evidencia=vecino.get("titulo") or "",
+                    via_grafo=vecino.get("via") or "",
                 )
 
         # Fallback: solo grafo (no hay chunks de ese paper en Supabase/pgvector)
@@ -360,8 +472,9 @@ class RecuperacionService:
     # ── Internos ──────────────────────────────────────────────────────────
 
     def _buscar_fragmentos(
-        self, query: str, doi_normalizado: str, top_k: int
-    ) -> list[dict]:
+        self, query: str, doi_normalizado: str, top_k: int,
+        traduccion: str | None = None,
+    ) -> tuple[list[dict], str | None, int]:
         """
         Búsqueda en dos frentes para cerrar la brecha español→inglés:
 
@@ -374,7 +487,8 @@ class RecuperacionService:
            adicionales.
         """
         consultas = [query]
-        traduccion = self._traducir_a_ingles(query)
+        if traduccion is None:
+            traduccion = self._traducir_a_ingles(query)
         if traduccion and traduccion.lower() != query.lower():
             consultas.append(traduccion)
 
@@ -395,6 +509,7 @@ class RecuperacionService:
         )[:top_k]
 
         ids = {f["id"] for f in fragmentos}
+        anclas = 0
         for termino in _terminos_ancla(query):
             for f in supabase_vector_service.buscar_por_termino(
                 doi_normalizado, termino, limit=1
@@ -403,9 +518,89 @@ class RecuperacionService:
                     f["similitud"] = 0.0
                     fragmentos.append(f)
                     ids.add(f["id"])
+                    anclas += 1
                     logger.debug("ancla_lexica_anexada", termino=termino, chunk=f["chunk_index"])
 
-        return fragmentos
+        return fragmentos, traduccion, anclas
+
+    def _vecinos_en_el_grafo(self, documento_id: str, ref_id: str) -> list[dict]:
+        """
+        Papers de la propia bibliografía cercanos al citado, en orden de
+        pertinencia: primero los que la fuente citada declara en su
+        bibliografía, luego los que comparten autor, luego los que comparten
+        concepto. Solo se devuelven los que están indexados.
+        """
+        vecinos: dict[str, dict] = {}
+        consultas = (
+            _Q_VECINOS_POR_CITA_EXTERNA,
+            _Q_VECINOS_POR_AUTOR,
+            _Q_VECINOS_POR_CONCEPTO,
+        )
+        try:
+            with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+                for query in consultas:
+                    for rec in session.run(
+                        query, doc_id=documento_id, ref_id=ref_id, limite=_MAX_VECINOS
+                    ):
+                        fila = dict(rec)
+                        vecinos.setdefault(fila["ref_id"], fila)
+                    if len(vecinos) >= _MAX_VECINOS:
+                        break
+        except Exception as e:
+            logger.warning("error_vecinos_grafo", ref_id=ref_id, error=str(e))
+            return []
+        return list(vecinos.values())[:_MAX_VECINOS]
+
+    def _buscar_en_vecinos(
+        self, documento_id: str, ref_id: str, query: str,
+        traduccion: str | None, n_fragmentos: int,
+    ) -> tuple[dict, dict] | None:
+        """
+        Busca la afirmación en los papers vecinos. Devuelve (mejor_fragmento,
+        vecino) o None. El umbral es MÁS alto que el de la búsqueda normal:
+        señalar la fuente equivocada es peor que no señalar ninguna.
+        """
+        vecinos = self._vecinos_en_el_grafo(documento_id, ref_id)
+        if not vecinos:
+            return None
+
+        mejor_global, vecino_global = None, None
+        for vecino in vecinos:
+            doi_norm = (vecino["doi"] or "").replace("/", "_").replace(".", "_")
+            if not doi_norm or not supabase_vector_service.paper_ya_indexado(doi_norm):
+                continue
+            fragmentos, _, _ = self._buscar_fragmentos(
+                query, doi_norm, n_fragmentos, traduccion=traduccion
+            )
+            if not fragmentos:
+                continue
+            mejor = fragmentos[0]
+            if mejor["similitud"] < _UMBRAL_VECINO:
+                continue
+            if mejor_global is None or mejor["similitud"] > mejor_global["similitud"]:
+                mejor_global, vecino_global = mejor, vecino
+
+        if mejor_global is None:
+            return None
+        logger.info(
+            "evidencia_hallada_en_vecino",
+            ref_origen=ref_id, ref_vecina=vecino_global["ref_id"],
+            via=vecino_global["via"], similitud=round(mejor_global["similitud"], 3),
+        )
+        return mejor_global, vecino_global
+
+    @staticmethod
+    def _guardar_consulta_en(cita_id: str, consulta_en: str) -> None:
+        """
+        Cachea la traducción al inglés en el nodo Cita. Sin esto se paga una
+        llamada al LLM por cita en cada auditoría y la consulta cambia entre
+        corridas, así que los resultados no son reproducibles.
+        """
+        try:
+            with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+                session.run(_Q_GUARDAR_CONSULTA_EN, cita_id=cita_id, consulta_en=consulta_en)
+        except Exception as e:
+            logger.warning("cache_traduccion_fallida", cita_id=cita_id, error=str(e))
 
     @staticmethod
     def _traducir_a_ingles(texto: str) -> str | None:

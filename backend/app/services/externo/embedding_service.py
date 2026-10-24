@@ -83,6 +83,100 @@ _FRASES_BOILERPLATE = [
 ]
 
 
+# ── Sección del paper a la que pertenece cada chunk ──────────────────────────
+# No toda parte de un paper vale lo mismo como evidencia. Un pasaje de
+# "Trabajos Relacionados" es el paper resumiendo trabajo AJENO: si la
+# afirmación del tesista casa ahí, el hallazgo probablemente no es de la
+# fuente que cita. Y una afirmación con cifras debería casar con Resultados,
+# no con la introducción. Sin esta etiqueta todos los chunks son equivalentes.
+
+SECCION_OTRO = "otro"
+
+# Orden importante: los patrones más específicos van primero, porque
+# "Related Work" contiene "work" y "Background and Related Work" debe caer en
+# trabajos_relacionados, no en introduccion.
+_PATRONES_SECCION: list[tuple[str, str]] = [
+    ("trabajos_relacionados",
+     r"related\s+works?|literature\s+review|prior\s+works?|state\s+of\s+the\s+art"
+     r"|previous\s+works?|related\s+literature|background\s+and\s+related(?:\s+works?)?"
+     r"|trabajos?\s+relacionados?|estado\s+del\s+arte|revisi[óo]n\s+(?:de\s+la\s+)?literatura"
+     r"|antecedentes|marco\s+te[óo]rico"),
+    ("resultados",
+     r"results?(?:\s+and\s+discussion)?|findings|experiments?(?:\s+and\s+results?)?"
+     r"|evaluation|experimental\s+results?|performance\s+evaluation"
+     r"|resultados?|hallazgos|experimentaci[óo]n"),
+    ("metodos",
+     r"methods?|methodology|materials?\s+and\s+methods?|experimental\s+setup"
+     r"|proposed\s+(?:method|approach|model|framework|system)|our\s+approach"
+     r"|study\s+design|data\s+(?:and\s+)?(?:collection|set|sets)"
+     r"|m[ée]todos?|metodolog[íi]a|materiales?\s+y\s+m[ée]todos?|dise[ñn]o\s+(?:del\s+)?estudio"),
+    ("discusion", r"discussions?|limitations?|discusi[óo]n|limitaciones"),
+    ("conclusion",
+     r"conclusions?(?:\s+and\s+future\s+work)?|concluding\s+remarks|future\s+work"
+     r"|conclusi[óo]n(?:es)?|trabajo\s+futuro"),
+    ("resumen", r"abstract|resumen|summary"),
+    ("introduccion", r"introduction|background|motivation|introducci[óo]n|antecedente"),
+]
+
+_SECCIONES = [(nombre, re.compile(rf"^\s*(?:{patron})\s*$", re.IGNORECASE))
+              for nombre, patron in _PATRONES_SECCION]
+
+# Un encabezado es una línea corta, sin punto final, posiblemente numerada
+# ("3.2 Related Work", "## Results", "**METHODS**").
+_RE_LINEA_ENCABEZADO = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:\*{1,3})?\s*"
+    r"(?:(?:[IVXLC]+|\d{1,2}(?:\.\d{1,2})*)[.)]?\s+)?"
+    r"(?P<titulo>[^.\n]{2,60}?)"
+    r"\s*[:.]?\s*(?:\*{1,3})?\s*$"
+)
+
+
+def _clasificar_encabezado(linea: str) -> str | None:
+    """Devuelve la sección canónica si la línea es un encabezado reconocible."""
+    if not linea or len(linea) > 90:
+        return None
+    m = _RE_LINEA_ENCABEZADO.match(linea.strip())
+    if not m:
+        return None
+    titulo = re.sub(r"[*#_]", "", m.group("titulo")).strip()
+    if not titulo or len(titulo.split()) > 7:
+        return None
+    for nombre, patron in _SECCIONES:
+        if patron.match(titulo):
+            return nombre
+    return None
+
+
+# Mínimo de secciones distintas para fiarse del etiquetado de un paper. Por
+# debajo, su estructura no se reconoció y arrastrar el último encabezado visto
+# contamina todo lo que sigue: un paper quedó con sus 363 chunks marcados como
+# "resumen" porque solo se detectó "Abstract" y nada más. Una etiqueta
+# equivocada es peor que ninguna, porque la auditoría razonaría sobre ella.
+_MIN_SECCIONES_RECONOCIDAS = 3
+
+
+def etiquetar_secciones(chunks: list[str]) -> list[str]:
+    """
+    Sección de cada chunk, en orden de lectura.
+
+    Se arrastra el último encabezado visto. Si el paper no expone al menos
+    `_MIN_SECCIONES_RECONOCIDAS` secciones distintas, se devuelve SECCION_OTRO
+    para todos: su estructura no se entendió y es preferible no afirmar nada.
+    """
+    etiquetas: list[str] = []
+    actual = SECCION_OTRO
+    for chunk in chunks:
+        for linea in chunk.splitlines():
+            nueva = _clasificar_encabezado(linea)
+            if nueva:
+                actual = nueva
+        etiquetas.append(actual)
+
+    distintas = {e for e in etiquetas if e != SECCION_OTRO}
+    if len(distintas) < _MIN_SECCIONES_RECONOCIDAS:
+        return [SECCION_OTRO] * len(chunks)
+    return etiquetas
+
 def _es_chunk_basura(chunk: str) -> bool:
     """
     Devuelve True si el chunk es ruido descartable antes de indexar.
@@ -397,11 +491,16 @@ class EmbeddingService:
             # Paso 3: filtros de ruido por sub-chunk (portada, boilerplate,
             # tablas/figuras). A esta granularidad una página mitad tabla /
             # mitad texto salva su texto y descarta la tabla.
-            chunks: list[tuple[int, str]] = []
+            # La sección se calcula sobre los candidatos EN CRUDO y en orden:
+            # los encabezados viven en chunks que luego se descartan como ruido,
+            # y limpiar_fragmento borra el marcado que los delata.
+            secciones = etiquetar_secciones([parte for _, parte in candidatos])
+
+            chunks: list[tuple[int, str, str]] = []
             for idx, (num_pagina, parte) in enumerate(candidatos):
                 if _es_chunk_portada(parte, idx, doi) or _es_chunk_basura(parte) or _es_chunk_ruido(parte):
                     continue
-                chunks.append((num_pagina, limpiar_fragmento(parte)))
+                chunks.append((num_pagina, limpiar_fragmento(parte), secciones[idx]))
             descartados = len(candidatos) - len(chunks)
 
             if descartados:
@@ -424,9 +523,11 @@ class EmbeddingService:
             )
 
             # Generar embeddings (batch a la API) y construir registros para Supabase
-            embeddings = self._embed([contenido for _, contenido in chunks])
+            embeddings = self._embed([contenido for _, contenido, _ in chunks])
             registros = []
-            for idx, ((num_pagina, contenido), embedding) in enumerate(zip(chunks, embeddings)):
+            for idx, ((num_pagina, contenido, seccion), embedding) in enumerate(
+                zip(chunks, embeddings)
+            ):
                 registros.append({
                     "id":              f"{doi_normalizado}_chunk_{idx}",
                     "doi":             doi,
@@ -438,6 +539,7 @@ class EmbeddingService:
                     "nivel_confianza": metadata.get("nivel_confianza"),
                     "referencia_id":   metadata.get("referencia_id"),
                     "contenido":       contenido,
+                    "seccion":         seccion,
                     "embedding":       embedding,
                 })
 
@@ -525,6 +627,18 @@ class EmbeddingService:
         return (
             supabase_vector_service.paper_ya_indexado(doi_normalizado)
             and supabase_vector_service.chunks_son_actuales(doi_normalizado)
+        )
+
+    def indexado_con_texto_completo(self, doi: str) -> bool:
+        """
+        True solo si lo indexado es el paper entero. Un paper guardado como
+        abstract debe reintentarse: el abstract no alcanza para verificar
+        afirmaciones concretas, y darlo por bueno congelaba el estado.
+        """
+        doi_normalizado = doi.replace("/", "_").replace(".", "_")
+        return (
+            supabase_vector_service.nivel_confianza_indexado(doi_normalizado)
+            == "texto_completo"
         )
 
     def total_papers_indexados(self) -> int:

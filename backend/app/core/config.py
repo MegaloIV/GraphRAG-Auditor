@@ -23,8 +23,25 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5.4-mini"
     openai_embedding_model: str = "text-embedding-3-small"  # 1536 dimensiones
 
+    # ── Google Drive (opcional) ──────────────────────────────────────────
+    # Copia de respaldo de los papers descargados. Si google_drive_carpeta_id
+    # está vacío, el sistema no sube nada y funciona exactamente igual.
+    google_drive_carpeta_id: str = ""
+    google_oauth_credenciales: str = "../Keys/google_oauth.json"
+    google_oauth_token: str = "../Keys/google_drive_token.json"
+
     # CrossRef / Unpaywall
     crossref_email: str = "malcaldel1@upao.edu.pe"
+
+    # API académica para obtener texto completo sin tropezar con los
+    # antirrobots de las editoriales. Es gratuita y con cuota diaria de unas
+    # 500 peticiones. Sin clave, el sistema simplemente no la usa y sigue con
+    # el resto de la cascada.
+    core_api_key: str = ""
+    # Apagada a propósito: lo que esta API consigue se incorpora como aporte
+    # externo a la auditoría, no como capacidad automática del sistema, para que la
+    # comparación de cobertura entre corridas mida siempre lo mismo.
+    usar_apis_academicas: bool = False
 
     # Neo4j
     neo4j_uri: str = ""

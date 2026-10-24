@@ -1,10 +1,6 @@
 from datasets import Dataset
 from ragas import evaluate
-from ragas.metrics import (
-    faithfulness,
-    answer_relevancy,
-    context_utilization,
-)
+from ragas.metrics import context_utilization
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from ragas.llms import LangchainLLMWrapper
 from ragas.embeddings import LangchainEmbeddingsWrapper
@@ -50,13 +46,25 @@ class RagasService:
         contextos: list[str],
     ) -> dict:
         """
-        Evalúa una cita con métricas RAGAS que no requieren ground truth externo.
+        Evalúa la RECUPERACIÓN de una cita con la única métrica de RAGAS
+        aplicable a este sistema.
 
-        - faithfulness:        ¿La respuesta está anclada en los contextos (no alucina)?
-        - answer_relevancy:    ¿La respuesta es relevante al claim verificado?
-        - context_utilization: ¿El fragmento recuperado es pertinente para el claim?
-                               (variante de context_precision SIN referencia: usa la
-                               respuesta del auditor en lugar de un ground truth)
+        - context_utilization: ¿el fragmento recuperado es pertinente para la
+          afirmación? (variante de context_precision sin ground truth)
+
+        Se dejaron de calcular `faithfulness` y `answer_relevancy`. RAGAS está
+        pensado para un RAG de pregunta-respuesta, y aquí el sistema no genera
+        una respuesta sino que emite una CLASIFICACIÓN, así que ambas medían
+        poco o nada: `answer_relevancy` pregunta si el veredicto es relevante
+        respecto a la afirmación que juzga, y siempre lo es. `faithfulness`
+        comprueba que la justificación esté anclada en el fragmento, algo que
+        ya garantiza de forma determinista la transcripción literal que el juez
+        está obligado a copiar y el sistema coteja.
+
+        Ninguna métrica de RAGAS puede decir si un veredicto es CORRECTO: eso
+        exige etiquetas de un experto. Los cinco REFUTES infundados que se
+        detectaron sobre tesis reales habrían puntuado alto aquí, porque
+        estaban bien argumentados sobre fragmentos pertinentes.
 
         Se excluyen context_recall, answer_correctness y context_precision (con
         referencia) porque requieren anotaciones humanas de ground truth que este
@@ -82,8 +90,8 @@ class RagasService:
                 resultado = self._evaluar(dataset)
             scores = resultado.to_pandas().iloc[0]
             return {
-                "faithfulness":      _safe_float(scores, "faithfulness"),
-                "answer_relevancy":  _safe_float(scores, "answer_relevancy"),
+                "faithfulness":      None,
+                "answer_relevancy":  None,
                 # context_utilization = context precision sin ground truth
                 "context_precision": _safe_float(scores, "context_utilization"),
             }
@@ -98,11 +106,7 @@ class RagasService:
     def _evaluar(self, dataset: Dataset):
         return evaluate(
             dataset,
-            metrics=[
-                faithfulness,
-                answer_relevancy,
-                context_utilization,
-            ],
+            metrics=[context_utilization],
             llm=self.llm,
             embeddings=self.embeddings,
         )

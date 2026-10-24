@@ -56,3 +56,24 @@ class TestDOIParaChunks:
 
     def test_la_clave_es_estable_entre_llamadas(self):
         assert doi_para_chunks(DOI_TESIS) == doi_para_chunks(DOI_TESIS)
+
+
+class TestValidacionDelFormato:
+    """
+    Un valor que no es un DOI no debe viajar en el campo DOI: después se
+    consulta contra CrossRef y Unpaywall, y falla siempre. Se vieron
+    identificadores de arXiv sueltos guardados como doi_verificado.
+    """
+
+    def test_descarta_lo_que_no_es_un_doi(self):
+        assert normalizar_doi("texto cualquiera") == ""
+        assert normalizar_doi("arXiv:1512.03385v1 [cs.CV] y mas cosas raras") != "arxiv:1512.03385v1 [cs.cv]"
+
+    def test_convierte_un_identificador_de_arxiv_a_su_doi(self):
+        # El paper es público: convertirlo lo vuelve descargable.
+        assert normalizar_doi("arXiv:1512.03385v1 [cs.CV]") == "10.48550/arxiv.1512.03385"
+        assert normalizar_doi("arxiv:2511.11035") == "10.48550/arxiv.2511.11035"
+
+    def test_conserva_un_doi_con_parentesis(self):
+        # Formato antiguo de Elsevier; es válido y no debe descartarse.
+        assert normalizar_doi("10.1016/S0190-9622(94)70061-3") == "10.1016/s0190-9622(94)70061-3"

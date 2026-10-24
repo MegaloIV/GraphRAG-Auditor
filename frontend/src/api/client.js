@@ -173,6 +173,9 @@ export const coherenciaAPI = {
   analizar: (documentoId) =>
     client.post(`/coherencia/${documentoId}`, null, { timeout: AUDITORIA_TIMEOUT }),
   ver: (documentoId) => client.get(`/coherencia/${documentoId}`),
+  // Informe de coherencia en Excel, generado por el propio sistema.
+  exportar: (documentoId) =>
+    client.get(`/coherencia/${documentoId}/exportar`, { responseType: 'blob' }),
 }
 
 // ── Evaluación vs ground truth experto (admin, separado de RAGAS) ──

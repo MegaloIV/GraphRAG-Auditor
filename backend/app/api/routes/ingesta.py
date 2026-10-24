@@ -450,7 +450,10 @@ def _ejecutar_pipeline(documento_id: str, ruta_pdf: Path) -> None:
         )
 
         actualizar(70, "Construyendo grafo de conocimiento...")
-        grafo_carga_service.cargar_documento(documento_id, ruta_pdf.name)
+        grafo_carga_service.cargar_documento(
+            documento_id, ruta_pdf.name,
+            titulo=extraccion_service.extraer_titulo_tesis(texto_md),
+        )
         grafo_carga_service.cargar_referencias(documento_id, referencias)
         grafo_carga_service.cargar_citas(documento_id, citas)
 
@@ -562,8 +565,12 @@ def _ejecutar_verificacion(documento_id: str, referencia_ids: list[str]) -> None
         query = """
         MATCH (r:Referencia)
         WHERE r.id IN $referencia_ids
-        OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
-        RETURN r, collect(a.nombre) AS autores
+        CALL (r) {
+            OPTIONAL MATCH (r)-[e:ESCRITO_POR]->(a:Autor)
+            WITH a ORDER BY e.orden
+            RETURN collect(a.nombre) AS autores
+        }
+        RETURN r, autores
         """
         referencias_seleccionadas: list[ReferenciaAPA] = []
         with neo4j_service.driver.session(database=settings.neo4j_database) as session:
@@ -577,6 +584,10 @@ def _ejecutar_verificacion(documento_id: str, referencia_ids: list[str]) -> None
                     titulo=r.get("titulo", ""),
                     fuente=r.get("fuente"),
                     doi=r.get("doi"),
+                    # Sin esto, las fuentes web (documentación, guías) no se
+                    # pueden descargar: la verificación las descarta por no
+                    # tener DOI sin llegar a mirar su URL.
+                    url=r.get("url"),
                     datos_incompletos=r.get("datos_incompletos", False),
                     campos_faltantes=[],
                 ))

@@ -18,6 +18,18 @@ class VeredictoAuditoria(BaseModel):
     veredicto: VeredictoTipo
     justificacion: str
     fragmento_evidencia: str = ""
+    # Frase literal del paper que el juez transcribió para sostener su
+    # veredicto; se coteja contra el fragmento antes de aceptarla.
+    cita_textual: str = ""
+    # Sección del paper de donde salió la evidencia. "trabajos_relacionados"
+    # avisa de que el pasaje es la fuente citando a otros.
+    seccion_evidencia: str = ""
+    # El fragmento reescrito para que se lea con claridad, sin añadir nada.
+    fragmento_legible: str = ""
+    # Qué afirma la fuente que resulta incompatible con la cita. Solo se llena
+    # en un REFUTES: es la prueba que sostiene la acusación, y el revisor tiene
+    # que poder verla para juzgarla.
+    contradiccion: str = ""
     # Traducción al español del fragmento (para mostrar; el original se
     # conserva para trazabilidad y para el módulo de coherencia).
     fragmento_evidencia_es: str = ""

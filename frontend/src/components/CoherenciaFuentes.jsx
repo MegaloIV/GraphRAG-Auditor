@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
-import { Network, X, RefreshCcw } from 'lucide-react'
+import { forceRadial } from 'd3-force-3d'
+import { Download, Network, X, RefreshCcw } from 'lucide-react'
 import { EstadoCarga, ErrorInline } from './Estados'
 import { coherenciaAPI } from '../api/client'
+import { descargarBlob } from '../lib/formato'
 
 // Coherencia inter-fuentes (docs/COHERENCIA.md §9): mapa de referencias
 // conectadas por lo que DICEN sus evidencias (no por la estructura del
@@ -98,6 +100,7 @@ export default function CoherenciaFuentes({ documentoId, auditada }) {
   const [datos, setDatos] = useState(null)
   const [cargando, setCargando] = useState(true)
   const [analizando, setAnalizando] = useState(false)
+  const [exportando, setExportando] = useState(false)
   const [error, setError] = useState(null)
   const [filtros, setFiltros] = useState(new Set(['APOYA', 'CONTRADICE', 'COMPLEMENTA', 'CO_MENCION']))
   const [conceptoActivo, setConceptoActivo] = useState(null)
@@ -112,6 +115,25 @@ export default function CoherenciaFuentes({ documentoId, auditada }) {
       .catch(() => {}) // 404 = aún no construido; se muestra el botón
       .finally(() => setCargando(false))
   }, [documentoId])
+
+  // Las fuerzas por defecto apelmazan los nodos: se separan y se encuadra el grafo
+  // para que el mapa se lea tanto en pantalla como impreso.
+  useEffect(() => {
+    const fg = fgRef.current
+    if (!fg || !datos?.mapa) return
+    fg.d3Force('charge')?.strength(-260).distanceMax(420)
+    fg.d3Force('link')?.distance(105).strength(0.3)
+    fg.d3Force('center')?.strength(0.07)
+    // Las referencias sin relación se irían al infinito empujadas por la repulsión: se las
+    // ordena en un anillo para que el núcleo conectado conserve espacio y se lea.
+    const conectados = new Set()
+    for (const l of datos.mapa.links) {
+      conectados.add(typeof l.source === 'object' ? l.source.id : l.source)
+      conectados.add(typeof l.target === 'object' ? l.target.id : l.target)
+    }
+    fg.d3Force('anillo', forceRadial(270, 0, 0).strength((n) => (conectados.has(n.id) ? 0 : 0.5)))
+    fg.d3ReheatSimulation?.()
+  }, [datos])
 
   useEffect(() => {
     const medir = () => contRef.current && setAncho(contRef.current.clientWidth)
@@ -131,6 +153,19 @@ export default function CoherenciaFuentes({ documentoId, auditada }) {
       setError(e)
     } finally {
       setAnalizando(false)
+    }
+  }
+
+  const exportar = async () => {
+    setExportando(true)
+    setError(null)
+    try {
+      const { data } = await coherenciaAPI.exportar(documentoId)
+      descargarBlob(data, `coherencia_${documentoId}.xlsx`)
+    } catch (e) {
+      setError(e)
+    } finally {
+      setExportando(false)
     }
   }
 
@@ -200,11 +235,20 @@ export default function CoherenciaFuentes({ documentoId, auditada }) {
             afirmaciones del tesista.
           </p>
         </div>
-        <button className="btn btn-contorno" onClick={analizar} disabled={analizando || !auditada}
-          title={!auditada ? 'Ejecuta primero la auditoría.' : undefined}>
-          <RefreshCcw size={14} className={analizando ? 'girando' : ''} />
-          {analizando ? 'Analizando…' : construido ? 'Re-analizar' : 'Analizar coherencia'}
-        </button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          {construido && (
+            <button className="btn btn-contorno" onClick={exportar} disabled={exportando}
+              title="Descarga el informe de coherencia de esta tesis">
+              <Download size={14} />
+              {exportando ? 'Generando informe…' : 'Descargar informe (Excel)'}
+            </button>
+          )}
+          <button className="btn btn-contorno" onClick={analizar} disabled={analizando || !auditada}
+            title={!auditada ? 'Ejecuta primero la auditoría.' : undefined}>
+            <RefreshCcw size={14} className={analizando ? 'girando' : ''} />
+            {analizando ? 'Analizando…' : construido ? 'Re-analizar' : 'Analizar coherencia'}
+          </button>
+        </div>
       </div>
 
       <ErrorInline error={error} />
@@ -271,22 +315,24 @@ export default function CoherenciaFuentes({ documentoId, auditada }) {
           )}
 
           {/* Mapa de referencias */}
-          <div ref={contRef} style={{ position: 'relative', height: 440, overflow: 'hidden', background: 'var(--bg-sunken)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)' }}>
+          <div ref={contRef} style={{ position: 'relative', height: 620, overflow: 'hidden', background: 'var(--bg-sunken)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)' }}>
             <ForceGraph2D
               ref={fgRef}
               graphData={grafo}
               width={ancho}
-              height={440}
+              height={620}
               nodeLabel={(n) => `${n.label} · ${n.n_citas} cita(s)`}
               nodeColor={(n) => (n.es_isla ? '#b45309' : '#64748b')}
-              nodeVal={(n) => 3 + Math.min(n.n_citas, 10)}
+              nodeVal={(n) => 9 + Math.min(n.n_citas, 10) * 2.5}
               linkColor={(l) => COLORES_RELACION[l.tipo]}
-              linkWidth={(l) => (l.tipo === 'CO_MENCION' ? 1 : 1.5 + Math.min(l.pares, 4))}
+              linkWidth={(l) => (l.tipo === 'CO_MENCION' ? 1.2 : 2 + Math.min(l.pares, 4))}
               linkLineDash={(l) => (l.tipo === 'CO_MENCION' ? [4, 4] : null)}
               linkLabel={(l) => `${l.tipo === 'CO_MENCION' ? 'Co-mención' : l.tipo} · ${l.pares} par(es)`}
               onLinkClick={(l) => setSeleccion({ tipo: 'arista', data: l })}
               onNodeClick={(n) => setSeleccion({ tipo: 'nodo', data: n })}
-              cooldownTicks={90}
+              cooldownTicks={140}
+              onEngineStop={() => fgRef.current?.zoomToFit(500, 45)}
+
             />
             <PanelDetalle seleccion={seleccion} nodosPorId={nodosPorId} onCerrar={() => setSeleccion(null)} />
             <div style={{ position: 'absolute', left: 12, bottom: 10, display: 'flex', gap: 12, fontSize: 12, color: 'var(--text-secondary)', flexWrap: 'wrap' }}>

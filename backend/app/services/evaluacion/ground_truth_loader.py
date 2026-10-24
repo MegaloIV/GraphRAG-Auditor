@@ -32,29 +32,49 @@ documento_id; ninguna está implementada):
 Punto de integración: app/api/routes/evaluacion.py::evaluar — ver el
 `TODO(B3)` que hoy toma las etiquetas del body del request.
 """
+import structlog
+
+from app.core.config import get_settings
+from app.models.auditoria import VeredictoTipo
 from app.models.evaluacion import EtiquetaExperto
+from app.services.grafo.neo4j_service import neo4j_service
+
+logger = structlog.get_logger(__name__)
+settings = get_settings()
+
+_Q_ETIQUETAS = """
+MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
+WHERE coalesce(c.etiqueta_experto, '') <> ''
+RETURN c.id AS cita_id, c.etiqueta_experto AS etiqueta
+"""
 
 
 def cargar(documento_id: str) -> list[EtiquetaExperto]:
     """
-    Devuelve las etiquetas del experto para el documento indicado.
+    Etiquetas del experto para el documento, leídas del grafo.
 
-    Entrada:  documento_id (str) — ID del documento auditado.
-    Salida:   list[EtiquetaExperto] — una etiqueta por cita evaluada.
-    Errores:  debería señalar "ground truth no disponible" para el documento
-              (excepción propia o lista vacía, a definir con el mecanismo).
+    Mecanismo elegido (opción D del diseño): las correcciones se capturan en el
+    informe Excel —el experto rellena la columna «CLASIFICACIÓN EXPERTO»— y al
+    reimportarlo quedan guardadas en cada nodo Cita. Así el ground truth no
+    vive en un archivo suelto que haya que volver a adjuntar cada vez: la
+    evaluación se puede recalcular cuando se quiera.
+
+    Devuelve lista vacía si nadie ha etiquetado todavía.
     """
-    # TODO: definir mecanismo (opciones A/B/C/D del docstring del módulo).
-    raise NotImplementedError("El mecanismo de carga del ground truth aún no está definido.")
+    try:
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            filas = [dict(r) for r in session.run(_Q_ETIQUETAS, doc_id=documento_id)]
+    except Exception as e:
+        logger.error("error_cargar_ground_truth", doc_id=documento_id, error=str(e))
+        return []
 
-
-def existe(documento_id: str) -> bool:
-    """
-    Indica si hay ground truth disponible para el documento (para que el
-    frontend pueda mostrar u ocultar la evaluación).
-
-    Entrada:  documento_id (str).
-    Salida:   bool.
-    """
-    # TODO: definir mecanismo (opciones A/B/C/D del docstring del módulo).
-    raise NotImplementedError("El mecanismo de carga del ground truth aún no está definido.")
+    etiquetas: list[EtiquetaExperto] = []
+    for fila in filas:
+        try:
+            etiquetas.append(EtiquetaExperto(
+                cita_id=fila["cita_id"],
+                etiqueta_experto=VeredictoTipo(fila["etiqueta"]),
+            ))
+        except ValueError:
+            logger.warning("etiqueta_invalida", cita_id=fila["cita_id"], valor=fila["etiqueta"])
+    return etiquetas

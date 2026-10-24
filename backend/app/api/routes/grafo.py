@@ -1,6 +1,5 @@
-import tempfile
+import re
 import uuid
-from pathlib import Path
 import structlog
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
@@ -42,8 +41,12 @@ async def ver_referencias(documento_id: str):
     try:
         query = """
         MATCH (d:Documento {id: $doc_id})-[:TIENE_REFERENCIA]->(r:Referencia)
-        OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
-        RETURN r, collect(a.nombre) AS autores
+        CALL (r) {
+  OPTIONAL MATCH (r)-[e:ESCRITO_POR]->(a:Autor)
+  WITH a ORDER BY e.orden
+  RETURN collect(a.nombre) AS autores
+}
+        RETURN r, autores
         """
         referencias = []
         with neo4j_service.driver.session() as session:
@@ -204,8 +207,12 @@ async def ver_grafo_visual(documento_id: str):
             for rec in session.run(
                 """
                 MATCH (d:Documento {id: $id})-[:TIENE_REFERENCIA]->(r:Referencia)
-                OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
-                RETURN r, collect(DISTINCT a) AS autores
+                CALL (r) {
+                    OPTIONAL MATCH (r)-[e:ESCRITO_POR]->(a:Autor)
+                    WITH a ORDER BY e.orden
+                    RETURN collect(a) AS autores
+                }
+                RETURN r, autores
                 """,
                 id=documento_id,
             ):
@@ -374,6 +381,161 @@ async def crear_cita(documento_id: str, datos: CrearCitaRequest):
     return creada
 
 
+
+@router.post(
+    "/{documento_id}/papers/lote",
+    summary="HU-VER: Subir varios papers de una vez; cada PDF se empareja solo",
+)
+async def subir_papers_en_lote(
+    documento_id: str,
+    archivos: list[UploadFile] = File(...),
+    nota: str = "El sistema no encontró este paper; se buscó y subió manualmente.",
+):
+    """
+    Indexa varios PDFs a la vez emparejando cada uno con su referencia.
+
+    Sustituye al flujo de subir los papers de uno en uno eligiendo a mano la
+    referencia de cada archivo, que es el cuello de botella real del sistema:
+    como las editoriales bloquean la descarga automática, la carga manual
+    termina siendo el camino principal.
+
+    El emparejamiento usa el DOI impreso en el propio PDF y, si no lo trae, su
+    título contra la cabecera. Los archivos que no se resuelven con seguridad
+    se devuelven en `sin_emparejar` para asignarlos a mano: emparejar mal un
+    paper es peor que no emparejarlo, porque la auditoría verificaría las citas
+    contra el texto equivocado.
+    """
+    from app.services.externo.doi_utils import doi_para_chunks, normalizar_doi
+    from app.services.externo.embedding_service import embedding_service
+    from app.services.ingesta.emparejador_pdf import emparejar
+    from app.services.vectorstore.supabase_service import supabase_vector_service
+
+    if not archivos:
+        raise HTTPException(
+            status_code=422,
+            detail={"codigo": "SIN_ARCHIVOS", "mensaje": "No se recibió ningún archivo.",
+                    "accion_sugerida": "Selecciona al menos un PDF."},
+        )
+
+    q_refs = """
+    MATCH (d:Documento {id: $doc_id})-[:TIENE_REFERENCIA]->(r:Referencia)
+    RETURN r.id AS ref_id, r.titulo AS titulo, r.anio AS anio,
+           coalesce(r.doi_verificado, r.doi, '') AS doi,
+           coalesce(r.doi_verificado, '') AS doi_indexado
+    """
+    with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+        referencias = [dict(x) for x in session.run(q_refs, doc_id=documento_id)]
+
+    if not referencias:
+        raise HTTPException(
+            status_code=404,
+            detail={"codigo": "SIN_REFERENCIAS", "mensaje": "El documento no tiene referencias cargadas.",
+                    "accion_sugerida": "Ejecuta primero la extracción."},
+        )
+
+    ya_usadas: set[str] = set()
+    emparejados, sin_emparejar, fallidos = [], [], []
+
+    for archivo in archivos:
+        contenido = await archivo.read()
+        if len(contenido) < 100 or not contenido.startswith(b"%PDF"):
+            fallidos.append({"archivo": archivo.filename, "motivo": "No es un PDF válido."})
+            continue
+
+        try:
+            from app.services.externo.fuentes_abiertas import pdf_a_texto
+            texto = pdf_a_texto(contenido) or ""
+        except Exception as e:
+            fallidos.append({"archivo": archivo.filename, "motivo": f"No se pudo leer: {e}"})
+            continue
+
+        if not texto or len(texto.strip()) < 100:
+            fallidos.append({
+                "archivo": archivo.filename,
+                "motivo": "Sin texto extraíble; puede ser un escaneo sin OCR.",
+            })
+            continue
+
+        # Las ya emparejadas en este lote salen del grupo: dos archivos no
+        # pueden ser el mismo paper.
+        candidatas = [r for r in referencias if r["ref_id"] not in ya_usadas]
+        referencia, metodo = emparejar(texto, candidatas)
+
+        if referencia is None:
+            sin_emparejar.append({"archivo": archivo.filename})
+            continue
+
+        ref_id = referencia["ref_id"]
+        doi_manual = f"manual_{ref_id}"
+        try:
+            # El paper pudo indexarse antes con solo su abstract, bajo el DOI
+            # real. Ese texto queda huérfano al pasar al DOI sintético de la
+            # carga manual, así que se borra: si no, el índice acumula chunks
+            # de un abstract que ya no representa a la fuente.
+            doi_previo = normalizar_doi(referencia.get("doi_indexado") or "")
+            if doi_previo and doi_previo != doi_manual:
+                supabase_vector_service.eliminar_chunks_por_doi(doi_para_chunks(doi_previo))
+                logger.info("chunks_de_abstract_reemplazados", ref_id=ref_id, doi=doi_previo)
+
+            embedding_service.indexar_paper(
+                doi=doi_manual,
+                texto=texto,
+                metadata={
+                    "doi": doi_manual,
+                    "doi_normalizado": doi_manual.replace("/", "_").replace(".", "_"),
+                    "titulo": referencia.get("titulo") or "Paper subido manualmente",
+                    "anio": str(referencia.get("anio") or ""),
+                    "nivel_confianza": "manual",
+                    "referencia_id": ref_id,
+                },
+            )
+            with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+                session.run(
+                    """
+                    MATCH (r:Referencia {id: $ref_id})
+                    SET r.nivel_confianza = 'manual',
+                        r.doi_verificado = $doi_manual,
+                        r.verificado = true,
+                        // El sistema no pudo obtener este paper por su cuenta:
+                        // se consiguió y subió a mano. Queda anotado para que
+                        // el informe distinga una cobertura automática de una
+                        // conseguida con trabajo humano.
+                        r.origen_manual = true,
+                        r.procedencia_texto = 'humano',
+                        r.origen_texto = 'subida_manual',
+                        r.nota_manual = $nota,
+                        r.verificado_en = datetime()
+                    """,
+                    ref_id=ref_id, doi_manual=doi_manual, nota=nota,
+                )
+            _respaldar_subida_humana(documento_id, doi_manual, contenido, texto)
+        except Exception as e:
+            fallidos.append({"archivo": archivo.filename, "motivo": f"Error al indexar: {e}"})
+            continue
+
+        ya_usadas.add(ref_id)
+        emparejados.append({
+            "archivo": archivo.filename,
+            "referencia_id": ref_id,
+            "titulo": referencia.get("titulo"),
+            "metodo": metodo,          # "doi" (inequívoco) o "titulo"
+        })
+
+    logger.info(
+        "papers_lote_procesados", doc_id=documento_id, recibidos=len(archivos),
+        emparejados=len(emparejados), sin_emparejar=len(sin_emparejar), fallidos=len(fallidos),
+    )
+    return {
+        "recibidos": len(archivos),
+        "emparejados": emparejados,
+        "sin_emparejar": sin_emparejar,
+        "fallidos": fallidos,
+        "referencias_pendientes": [
+            {"referencia_id": r["ref_id"], "titulo": r["titulo"]}
+            for r in referencias if r["ref_id"] not in ya_usadas
+        ],
+    }
+
 @router.delete(
     "/{documento_id}/citas/{cita_id}",
     summary="Eliminar una cita durante la revisión",
@@ -481,7 +643,32 @@ async def re_vincular(documento_id: str):
     return {
         "citas_vinculadas": resultado["vinculadas"],
         "citas_sin_vincular": resultado["no_vinculadas"],
+        # Vinculadas pero con más de una referencia candidata: la revisión
+        # humana debería confirmarlas.
+        "citas_ambiguas": resultado["ambiguas"],
     }
+
+
+def _respaldar_subida_humana(documento_id: str, clave: str, pdf: bytes, texto: str) -> None:
+    """
+    Copia en la carpeta de la tesis en Drive de un paper subido a mano,
+    marcado como intervención humana. Nunca interrumpe la subida.
+    """
+    try:
+        from app.services.storage.drive_service import drive_service
+        if not drive_service.activo:
+            return
+        with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+            rec = session.run(
+                "MATCH (d:Documento {id: $id}) RETURN coalesce(d.titulo, d.nombre_archivo, $id) AS t",
+                id=documento_id,
+            ).single()
+        titulo = rec["t"] if rec else documento_id
+        nombre = "[humano] " + re.sub(r"[^A-Za-z0-9._-]+", "_", clave)
+        drive_service.subir_paper(titulo, f"{nombre}.pdf", pdf, "application/pdf")
+        drive_service.subir_paper(titulo, f"{nombre}.md", texto.encode("utf-8"), "text/markdown")
+    except Exception as e:
+        logger.warning("respaldo_drive_manual_fallido", doc_id=documento_id, error=str(e)[:80])
 
 
 @router.post(
@@ -501,7 +688,6 @@ async def subir_paper_manual(
     from app.services.externo.embedding_service import embedding_service
     from app.services.externo.doi_utils import normalizar_doi, doi_para_chunks
     from app.services.vectorstore.supabase_service import supabase_vector_service
-    import pymupdf4llm
 
     contenido = await archivo.read()
     if len(contenido) < 100:
@@ -524,14 +710,11 @@ async def subir_paper_manual(
     except Exception as e:
         raise HTTPException(status_code=500, detail={"codigo": "ERROR_NEO4J", "mensaje": str(e), "accion_sugerida": "Intenta nuevamente."})
 
-    # Guardar PDF en archivo temporal, extraer texto
+    # Extraer texto (protegido: los documentos de cientos de páginas disparan
+    # la memoria de pymupdf4llm).
     try:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp.write(contenido)
-            tmp_path = tmp.name
-
-        texto = pymupdf4llm.to_markdown(tmp_path)
-        Path(tmp_path).unlink(missing_ok=True)
+        from app.services.externo.fuentes_abiertas import pdf_a_texto
+        texto = pdf_a_texto(contenido) or ""
 
         if not texto or len(texto.strip()) < 100:
             raise HTTPException(
@@ -575,10 +758,16 @@ async def subir_paper_manual(
         SET r.nivel_confianza = 'manual',
             r.doi_verificado = $doi_manual,
             r.verificado = true,
+            // Lo consiguió y subió una persona: el informe lo separa de lo
+            // que el sistema obtiene por su cuenta.
+            r.procedencia_texto = 'humano',
+            r.origen_texto = 'subida_manual',
+            r.origen_manual = true,
             r.verificado_en = datetime()
         """
         with neo4j_service.driver.session(database=settings.neo4j_database) as session:
             session.run(query_update, ref_id=referencia_id, doi_manual=doi_manual)
+        _respaldar_subida_humana(documento_id, doi_manual, contenido, texto)
     except Exception as e:
         logger.error("error_actualizar_neo4j_manual", ref_id=referencia_id, error=str(e))
 

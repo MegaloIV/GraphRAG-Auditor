@@ -12,6 +12,7 @@ CONSTRAINTS = [
     "CREATE CONSTRAINT ref_id IF NOT EXISTS FOR (r:Referencia) REQUIRE r.id IS UNIQUE",
     "CREATE CONSTRAINT cita_id IF NOT EXISTS FOR (c:Cita) REQUIRE c.id IS UNIQUE",
     "CREATE CONSTRAINT autor_nombre IF NOT EXISTS FOR (a:Autor) REQUIRE a.nombre_normalizado IS UNIQUE",
+    "CREATE CONSTRAINT ref_externa_id IF NOT EXISTS FOR (x:ReferenciaExterna) REQUIRE x.id IS UNIQUE",
 ]
 
 INDICES = [

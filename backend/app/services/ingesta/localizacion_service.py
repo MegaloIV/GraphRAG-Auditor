@@ -1,20 +1,21 @@
 """
 Localización exacta de citas dentro del PDF original (revisión humana).
 
-Para cada cita del documento (leída de Neo4j) busca su texto en el PDF con
-PyMuPDF `page.search_for` y devuelve la página real (1-based) más los
-rectángulos donde aparece, con las dimensiones de página para que el frontend
-escale el overlay de resaltado.
+Para cada cita del documento (leída de Neo4j) busca su texto en el PDF y
+devuelve la página real (1-based) más los rectángulos donde aparece, con las
+dimensiones de página para que el frontend escale el overlay de resaltado.
 
-La misma cita "(Autor, año)" puede aparecer varias veces en el documento, así
-que primero se busca por CONTEXTO: la cola del fragmento_oracion que termina
-en la cita, que es (casi) única. Sin contexto utilizable, las ocurrencias del
-texto se reparten en orden entre las citas que comparten el mismo texto, para
-que dos cartillas iguales no apunten a la misma página.
+La búsqueda NO usa `page.search_for`: esa función no cruza saltos de línea de
+forma fiable y tanto la cita como su contexto los cruzan constantemente en un
+PDF justificado, que es de donde venían los resaltados que caían en el lugar
+equivocado o en ninguno. En su lugar cada página se indexa una vez como texto
+corrido con el rect de cada palabra (_indexar_pagina) y se busca ahí.
 
-Si el texto exacto de la cita no aparece (p. ej. el LLM lo normalizó), se cae
-a variantes construidas a partir del apellido y el año: "Apellido (año)",
-"Apellido, año" y "(Apellido, año)". Sin match → pagina_real=None, rects=[].
+La misma cita "(Autor, año)" puede aparecer varias veces, así que primero se
+busca por CONTEXTO: la cola del fragmento_oracion que termina en la cita, que
+es (casi) única. Cada ubicación informa en `metodo` cómo se resolvió
+—"contexto", "exacta", "ambigua", "no_hallada"— para que la revisión humana
+sepa cuándo el resaltado es certero y cuándo es solo el mejor candidato.
 
 El resultado se cachea en Storage (ubicaciones/{documento_id}.json) y se
 invalida cuando se edita/crea/elimina una cita.
@@ -29,6 +30,8 @@ from app.core.config import get_settings
 from app.services.grafo.neo4j_service import neo4j_service
 from app.services.storage.supabase_storage_service import storage_service
 
+_RE_ESPACIOS = re.compile(r"\s+")
+
 logger = structlog.get_logger(__name__)
 settings = get_settings()
 
@@ -36,7 +39,7 @@ settings = get_settings()
 # Versión del formato/algoritmo del cache de ubicaciones. Se incrementa al
 # cambiar la localización para recalcular caches viejos (p. ej. los que
 # asignaban todas las citas duplicadas a la primera ocurrencia).
-_VERSION_CACHE = 2
+_VERSION_CACHE = 3
 
 
 def _objeto_cache(documento_id: str) -> str:
@@ -59,6 +62,116 @@ _TERMINOS_REFERENCIAS = [
     "bibliography",
 ]
 
+
+# ── Índice de página: texto plano con un rectángulo por carácter ─────────────
+# `page.search_for` no cruza saltos de línea de forma fiable, y una cita o su
+# contexto casi siempre los cruza en un PDF justificado. Por eso cada página se
+# indexa una vez como texto corrido —palabras unidas por un espacio, guiones de
+# corte pegados— guardando el rect de cada palabra. Buscar pasa a ser un `find`
+# sobre ese texto, insensible al layout, y el span encontrado se traduce de
+# vuelta a rectángulos para el resaltado.
+
+# Canonicalización 1:1 en longitud: no puede desplazar los offsets.
+_CANON = str.maketrans({
+    "’": "'", "‘": "'", "“": '"', "”": '"',
+    # El guion se neutraliza a espacio en AMBOS lados de la comparación: el
+    # markdown pierde el guion de "Johnson-Laird" cortado entre renglones
+    # mientras el PDF lo conserva. Al aplicarse igual a aguja y página, la
+    # equivalencia se mantiene sin desplazar offsets.
+    "-": " ", "–": " ", "—": " ", "‑": " ", "−": " ",
+    "\u00a0": " ", "\u202f": " ", "\u2009": " ",
+})
+
+
+def _canon(texto: str) -> str:
+    """Minúsculas y variantes tipográficas unificadas, sin cambiar longitudes."""
+    return texto.translate(_CANON).lower()
+
+
+class _PaginaIndexada:
+    """Texto corrido de una página + el rect de cada tramo de caracteres."""
+
+    __slots__ = ("numero", "texto", "spans", "ancho", "alto")
+
+    def __init__(self, numero, texto, spans, ancho, alto):
+        self.numero = numero      # 1-based
+        self.texto = texto        # ya canonicalizado
+        self.spans = spans        # [(ini_char, fin_char, rect)] en orden
+        self.ancho = ancho
+        self.alto = alto
+
+
+def _indexar_pagina(page, numero: int) -> _PaginaIndexada:
+    palabras = page.get_text("words")
+    # Orden de lectura: bloque, línea, palabra.
+    palabras.sort(key=lambda w: (w[5], w[6], w[7]))
+
+    partes: list[str] = []
+    spans: list[tuple[int, int, object]] = []
+    pos = 0
+    for x0, y0, x1, y1, palabra, *_ in palabras:
+        if partes:
+            # "Johnson-" + "Laird" → "Johnson-Laird": el guion de corte de
+            # renglón no lleva espacio, igual que en app.core.texto.aplanar.
+            if not partes[-1].endswith("-"):
+                partes.append(" ")
+                pos += 1
+        partes.append(palabra)
+        spans.append((pos, pos + len(palabra), (x0, y0, x1, y1)))
+        pos += len(palabra)
+
+    return _PaginaIndexada(
+        numero, _canon("".join(partes)), spans, page.rect.width, page.rect.height
+    )
+
+
+def _rects_de_span(pagina: _PaginaIndexada, inicio: int, fin: int) -> list[RectResaltado]:
+    """Rectángulos de las palabras que caen dentro de [inicio, fin), por renglón."""
+    tocados = [r for ini, f, r in pagina.spans if ini < fin and f > inicio]
+    if not tocados:
+        return []
+
+    # Agrupar por renglón: mismas coordenadas verticales ⇒ un solo rect ancho.
+    renglones: list[list[tuple]] = []
+    for rect in tocados:
+        for grupo in renglones:
+            if abs(grupo[0][1] - rect[1]) < 3 and abs(grupo[0][3] - rect[3]) < 3:
+                grupo.append(rect)
+                break
+        else:
+            renglones.append([rect])
+
+    return [
+        RectResaltado(
+            pagina=pagina.numero,
+            x0=min(r[0] for r in grupo),
+            y0=min(r[1] for r in grupo),
+            x1=max(r[2] for r in grupo),
+            y1=max(r[3] for r in grupo),
+            ancho_pagina=pagina.ancho,
+            alto_pagina=pagina.alto,
+        )
+        for grupo in renglones
+    ]
+
+
+def _buscar_en_documento(
+    paginas: list[_PaginaIndexada], aguja: str
+) -> list[tuple[_PaginaIndexada, int, int]]:
+    """Todas las ocurrencias de `aguja` en el documento, en orden de lectura."""
+    aguja = _canon(_RE_ESPACIOS.sub(" ", aguja).strip())
+    if len(aguja) < 3:
+        return []
+    hallazgos = []
+    for pagina in paginas:
+        desde = 0
+        while True:
+            i = pagina.texto.find(aguja, desde)
+            if i == -1:
+                break
+            hallazgos.append((pagina, i, i + len(aguja)))
+            desde = i + 1
+    return hallazgos
 
 def _variantes_busqueda(texto_cita: str) -> list[str]:
     """
@@ -166,6 +279,7 @@ class LocalizacionService:
         query = """
         MATCH (d:Documento {id: $doc_id})-[:TIENE_CITA]->(c:Cita)
         RETURN c.id AS cita_id, c.texto AS texto_cita,
+               c.texto_original AS texto_original,
                c.fragmento AS fragmento, c.pagina AS pagina
         """
         with neo4j_service.driver.session(database=settings.neo4j_database) as session:
@@ -173,6 +287,9 @@ class LocalizacionService:
                 {
                     "cita_id": rec["cita_id"],
                     "texto_cita": rec["texto_cita"] or "",
+                    # Lo que literalmente hay en el PDF: en un grupo
+                    # "(A, 2020; B, 2019)" es el paréntesis entero.
+                    "texto_original": rec["texto_original"] or rec["texto_cita"] or "",
                     "fragmento": rec["fragmento"] or "",
                     "pagina": rec["pagina"] or 0,
                 }
@@ -185,28 +302,115 @@ class LocalizacionService:
         import fitz
 
         with fitz.open(ruta_pdf) as doc:
-            # Las citas se procesan en orden de página estimada para que las
-            # ocurrencias de un mismo texto se repartan en orden de aparición.
-            orden = sorted(range(len(citas)), key=lambda i: citas[i]["pagina"])
-            resultados: dict[int, UbicacionCita] = {}
-            ocurrencias_por_texto: dict[str, list] = {}
-            siguiente_ocurrencia: dict[str, int] = {}
-            for i in orden:
-                resultados[i] = self._localizar_cita(
-                    doc, citas[i], ocurrencias_por_texto, siguiente_ocurrencia
-                )
-            ubicaciones = [resultados[i] for i in range(len(citas))]
+            paginas = [_indexar_pagina(page, n) for n, page in enumerate(doc, start=1)]
             pagina_referencias = self._pagina_referencias(doc)
 
-        localizadas = sum(1 for u in ubicaciones if u.pagina_real is not None)
+        # Las citas se procesan en orden de página estimada para que las
+        # ocurrencias de un mismo texto se repartan en orden de aparición.
+        orden = sorted(range(len(citas)), key=lambda i: citas[i]["pagina"])
+        cache_ocurrencias: dict[str, list] = {}
+        usadas: dict[str, int] = {}
+        resultados: dict[int, UbicacionCita] = {}
+        for i in orden:
+            resultados[i] = self._localizar_cita(
+                paginas, citas[i], cache_ocurrencias, usadas
+            )
+        ubicaciones = [resultados[i] for i in range(len(citas))]
+
+        conteo: dict[str, int] = {}
+        for u in ubicaciones:
+            conteo[u.metodo] = conteo.get(u.metodo, 0) + 1
         logger.info(
             "citas_localizadas",
             total=len(ubicaciones),
-            localizadas=localizadas,
-            no_localizadas=len(ubicaciones) - localizadas,
+            por_contexto=conteo.get("contexto", 0),
+            exactas=conteo.get("exacta", 0),
+            ambiguas=conteo.get("ambigua", 0),
+            no_halladas=conteo.get("no_hallada", 0),
             pagina_referencias=pagina_referencias,
         )
         return ubicaciones, pagina_referencias
+
+    # Contexto que se antepone a la cita para desambiguarla, y mínimo de
+    # caracteres propios que debe aportar para considerarse distintivo.
+    _CONTEXTO_CHARS = 70
+    _MIN_CONTEXTO_EXTRA = 12
+
+    def _localizar_cita(
+        self,
+        paginas: list["_PaginaIndexada"],
+        cita: dict,
+        cache: dict[str, list],
+        usadas: dict[str, int],
+    ) -> UbicacionCita:
+        """
+        Resuelve dónde está la cita en el PDF, en tres intentos:
+
+        1. Por contexto: la cola de la oración que termina en la cita es casi
+           única en el documento, así que distingue entre varias apariciones
+           del mismo "(Autor, año)".
+        2. Por texto literal: si aparece UNA sola vez, no hay ambigüedad.
+        3. Si aparece varias veces y no hubo contexto, se reparten en orden de
+           lectura, pero el resultado queda marcado como "ambigua" para que la
+           revisión humana sepa que el resaltado puede no ser la ocurrencia
+           exacta. Antes esto se devolvía como si fuera certero.
+        """
+        texto_cita = (cita.get("texto_cita") or "").strip()
+        original = (cita.get("texto_original") or texto_cita).strip()
+
+        def resultado(metodo, pagina=None, ini=0, fin=0) -> UbicacionCita:
+            return UbicacionCita(
+                cita_id=cita["cita_id"],
+                texto_cita=cita.get("texto_cita", ""),
+                pagina_real=pagina.numero if pagina else None,
+                rects=_rects_de_span(pagina, ini, fin) if pagina else [],
+                metodo=metodo,
+            )
+
+        if not original:
+            return resultado("no_hallada")
+
+        # 1) Contexto
+        fragmento = _RE_ESPACIOS.sub(" ", cita.get("fragmento") or "").strip()
+        pos = fragmento.rfind(original)
+        if pos != -1:
+            contexto = fragmento[max(0, pos - self._CONTEXTO_CHARS):pos + len(original)].strip()
+            if len(contexto) >= len(original) + self._MIN_CONTEXTO_EXTRA:
+                hallazgos = self._ocurrencias(paginas, contexto, cache)
+                if hallazgos:
+                    pagina, ini, fin = hallazgos[0]
+                    # Resaltar solo la cita, no el contexto entero.
+                    aguja = _canon(_RE_ESPACIOS.sub(" ", original).strip())
+                    rel = pagina.texto.find(aguja, ini, fin)
+                    if rel != -1:
+                        ini, fin = rel, rel + len(aguja)
+                    return resultado("contexto", pagina, ini, fin)
+
+        # 2 y 3) Texto literal y variantes
+        for aguja in [original, *_variantes_busqueda(texto_cita)]:
+            hallazgos = self._ocurrencias(paginas, aguja, cache)
+            if not hallazgos:
+                continue
+            if len(hallazgos) == 1:
+                pagina, ini, fin = hallazgos[0]
+                return resultado("exacta", pagina, ini, fin)
+            indice = min(usadas.get(aguja, 0), len(hallazgos) - 1)
+            usadas[aguja] = indice + 1
+            pagina, ini, fin = hallazgos[indice]
+            logger.debug(
+                "cita_ambigua", cita=texto_cita, ocurrencias=len(hallazgos), elegida=indice
+            )
+            return resultado("ambigua", pagina, ini, fin)
+
+        return resultado("no_hallada")
+
+    @staticmethod
+    def _ocurrencias(
+        paginas: list["_PaginaIndexada"], aguja: str, cache: dict[str, list]
+    ) -> list[tuple]:
+        if aguja not in cache:
+            cache[aguja] = _buscar_en_documento(paginas, aguja)
+        return cache[aguja]
 
     @staticmethod
     def _pagina_referencias(doc) -> int | None:
@@ -220,110 +424,6 @@ class LocalizacionService:
             if paginas:
                 return paginas[-1]
         return None
-
-    def _localizar_cita(
-        self,
-        doc,
-        cita: dict,
-        ocurrencias_por_texto: dict[str, list],
-        siguiente_ocurrencia: dict[str, int],
-    ) -> UbicacionCita:
-        texto_cita = cita["texto_cita"].strip()
-        no_localizada = UbicacionCita(
-            cita_id=cita["cita_id"], texto_cita=cita["texto_cita"],
-            pagina_real=None, rects=[],
-        )
-        if not texto_cita:
-            return no_localizada
-
-        # 1) El fragmento (aseveración) da contexto único: distingue entre
-        #    varias ocurrencias del mismo "(Autor, año)" en el documento.
-        ubicacion = self._localizar_por_contexto(doc, cita)
-        if ubicacion is not None:
-            return ubicacion
-
-        # 2) Sin contexto utilizable: las ocurrencias del texto se reparten
-        #    en orden entre las citas que comparten el mismo texto.
-        if texto_cita not in ocurrencias_por_texto:
-            ocurrencias_por_texto[texto_cita] = self._ocurrencias(doc, texto_cita)
-        ocurrencias = ocurrencias_por_texto[texto_cita]
-        if not ocurrencias:
-            return no_localizada
-
-        idx = min(siguiente_ocurrencia.get(texto_cita, 0), len(ocurrencias) - 1)
-        siguiente_ocurrencia[texto_cita] = idx + 1
-        numero, rect, ancho, alto = ocurrencias[idx]
-        return UbicacionCita(
-            cita_id=cita["cita_id"],
-            texto_cita=cita["texto_cita"],
-            pagina_real=numero,
-            rects=[RectResaltado(
-                pagina=numero,
-                x0=rect.x0, y0=rect.y0, x1=rect.x1, y1=rect.y1,
-                ancho_pagina=ancho, alto_pagina=alto,
-            )],
-        )
-
-    # El contexto debe aportar caracteres propios además de la cita para
-    # considerarse distintivo.
-    _MIN_CONTEXTO_EXTRA = 12
-
-    def _localizar_por_contexto(self, doc, cita: dict) -> UbicacionCita | None:
-        """
-        Busca la cola del fragmento_oracion que termina en la cita (~60 chars
-        de contexto + la cita). Ese texto es (casi) único en el documento, así
-        que resuelve la página correcta cuando el mismo "(Autor, año)" aparece
-        varias veces. None si el fragmento no sirve o no hay match.
-        """
-        texto_cita = cita["texto_cita"].strip()
-        fragmento = re.sub(r"\s+", " ", cita.get("fragmento") or "").strip()
-        pos = fragmento.rfind(texto_cita)
-        if pos == -1:
-            return None
-        fin = pos + len(texto_cita)
-        contexto = fragmento[max(0, pos - 60):fin].strip()
-        if len(contexto) < len(texto_cita) + self._MIN_CONTEXTO_EXTRA:
-            return None
-
-        for numero, page in enumerate(doc, start=1):
-            hits_contexto = page.search_for(contexto)
-            if not hits_contexto:
-                continue
-            # Rects de la cita dentro del contexto encontrado; si la búsqueda
-            # fina falla, se resalta el último renglón del contexto (donde
-            # termina la cita).
-            hits_cita = [
-                h for h in page.search_for(texto_cita)
-                if any(h.intersects(hc) for hc in hits_contexto)
-            ] or [hits_contexto[-1]]
-            return UbicacionCita(
-                cita_id=cita["cita_id"],
-                texto_cita=cita["texto_cita"],
-                pagina_real=numero,
-                rects=[RectResaltado(
-                    pagina=numero,
-                    x0=h.x0, y0=h.y0, x1=h.x1, y1=h.y1,
-                    ancho_pagina=page.rect.width,
-                    alto_pagina=page.rect.height,
-                ) for h in hits_cita],
-            )
-        return None
-
-    @staticmethod
-    def _ocurrencias(doc, texto_cita: str) -> list[tuple[int, object, float, float]]:
-        """
-        Todas las ocurrencias (página, rect, ancho, alto) de la primera
-        variante del texto con matches, en orden de aparición en el documento.
-        """
-        for variante in _variantes_busqueda(texto_cita):
-            ocurrencias = []
-            for numero, page in enumerate(doc, start=1):
-                for h in page.search_for(variante):
-                    ocurrencias.append((numero, h, page.rect.width, page.rect.height))
-            if ocurrencias:
-                return ocurrencias
-        return []
-
 
 # Singleton
 localizacion_service = LocalizacionService()

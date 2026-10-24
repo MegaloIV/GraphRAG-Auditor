@@ -31,6 +31,7 @@ from app.core.config import get_settings
 from app.services.externo.doi_utils import normalizar_doi, doi_para_chunks
 from app.services.externo.embedding_service import embedding_service
 from app.services.externo.unpaywall_service import unpaywall_service
+from app.services.ingesta.emparejador_pdf import emparejar
 from app.services.grafo.grafo_carga_service import grafo_carga_service
 from app.services.grafo.neo4j_service import neo4j_service
 from app.services.storage.supabase_storage_service import storage_service
@@ -127,6 +128,34 @@ def _buscar_pdf_en_zip(archivos_ris: list[str], pdfs: dict[str, bytes]) -> bytes
     return None
 
 
+def _buscar_pdf_por_contenido(
+    entrada: dict, pdfs: dict[str, bytes], usados: set[str]
+) -> tuple[bytes | None, str | None]:
+    """
+    Empareja la entrada del RIS con un PDF del ZIP leyendo el propio PDF.
+
+    El campo L1 solo existe si el usuario marcó "Exportar archivos" al generar
+    el RIS, y Zotero a veces escribe rutas que no son nombres de fichero. Sin
+    L1 el flujo caía a Unpaywall, es decir al mismo camino bloqueado que hace
+    falta evitar. Leer el DOI o el título dentro del PDF no depende de nada de
+    eso.
+    """
+    referencia = [{
+        "ref_id": "_", "titulo": entrada.get("titulo") or "",
+        "doi": entrada.get("doi") or "", "anio": entrada.get("anio"),
+    }]
+    for miembro, data in pdfs.items():
+        if miembro in usados:
+            continue
+        texto = _texto_desde_pdf(data)
+        if not texto:
+            continue
+        encontrada, _ = emparejar(texto, referencia)
+        if encontrada is not None:
+            return data, miembro
+    return None, None
+
+
 def _texto_desde_pdf(contenido: bytes) -> str | None:
     import pymupdf4llm
 
@@ -156,6 +185,9 @@ class ZoteroService:
         notificar(5, "Leyendo la colección de Zotero...")
 
         pdfs_zip: dict[str, bytes] = {}
+        # PDFs del ZIP ya asignados a una entrada: dos entradas del RIS no
+        # pueden ser el mismo archivo.
+        pdfs_emparejados: set[str] = set()
         if nombre_archivo.lower().endswith(".zip"):
             texto_ris, pdfs_zip = _extraer_zip(contenido)
             if texto_ris is None:
@@ -204,11 +236,19 @@ class ZoteroService:
             # 2. Conseguir el texto del paper: adjunto del ZIP > Unpaywall por DOI.
             texto, nivel = None, None
             pdf = _buscar_pdf_en_zip(entrada["archivos"], pdfs_zip)
+            miembro_usado = None
+            if pdf is None:
+                # Sin L1 en el RIS, se empareja por el contenido del PDF.
+                pdf, miembro_usado = _buscar_pdf_por_contenido(
+                    entrada, pdfs_zip, pdfs_emparejados
+                )
             if pdf:
                 texto = _texto_desde_pdf(pdf)
                 if texto:
                     nivel = "zotero"
                     resumen["con_pdf_zotero"] += 1
+                    if miembro_usado:
+                        pdfs_emparejados.add(miembro_usado)
             if texto is None and entrada["doi"]:
                 resultado = unpaywall_service.buscar_pdf_gratuito(entrada["doi"])
                 if resultado.tiene_pdf_gratuito and resultado.texto_completo:
@@ -260,10 +300,14 @@ class ZoteroService:
     def _leer_referencias(self, documento_id: str) -> list[dict]:
         query = """
         MATCH (d:Documento {id: $doc_id})-[:TIENE_REFERENCIA]->(r:Referencia)
-        OPTIONAL MATCH (r)-[:ESCRITO_POR]->(a:Autor)
+        CALL (r) {
+  OPTIONAL MATCH (r)-[e:ESCRITO_POR]->(a:Autor)
+  WITH a ORDER BY e.orden
+  RETURN collect(a.nombre) AS autores
+}
         RETURN r.id AS ref_id, r.titulo AS titulo, r.anio AS anio,
                r.doi AS doi, r.doi_verificado AS doi_verificado,
-               collect(a.nombre) AS autores
+               autores
         """
         with neo4j_service.driver.session(database=settings.neo4j_database) as session:
             return [dict(rec) for rec in session.run(query, doc_id=documento_id)]

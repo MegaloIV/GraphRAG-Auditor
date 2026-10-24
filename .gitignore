@@ -14,3 +14,10 @@ backend/sql
 env.yaml
 /docs
 backend/venv-wsl/
+
+# Tesis de prueba (no subir: documentos de terceros)
+tesis/
+MITESIS/
+
+# Informes generados (contienen datos de tesis de terceros)
+informes/

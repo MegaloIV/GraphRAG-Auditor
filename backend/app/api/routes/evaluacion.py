@@ -13,16 +13,18 @@ from datetime import datetime, timezone
 import structlog
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.config import get_settings
 from app.models.evaluacion import (
+    EtiquetaExperto,
     EvaluarRequest,
     EvaluacionResultado,
     MatrizConfusion,
     CategoriaMetricas,
 )
+from app.models.auditoria import VeredictoTipo
 from app.services.evaluacion.metricas_service import calcular_metricas
 from app.services.grafo.neo4j_service import neo4j_service
 from app.services.storage.supabase_storage_service import storage_service
@@ -141,6 +143,149 @@ def _cargar_resultado(documento_id: str) -> EvaluacionResultado:
         })
     return EvaluacionResultado(**json.loads(crudo))
 
+
+
+_COL_EXPERTO = "TU VEREDICTO"
+_COL_JUSTIFICACION = "TU JUSTIFICACIÓN"
+_COL_CITA_ID = "cita_id"
+_HOJA = "Revisión"
+
+_EQUIVALENCIAS = {
+    "SUPPORTS": "SUPPORTS", "SOPORTA": "SUPPORTS", "RESPALDA": "SUPPORTS",
+    "REFUTES": "REFUTES", "REFUTA": "REFUTES", "CONTRADICE": "REFUTES",
+    "NO INFO": "NO_INFO", "NO_INFO": "NO_INFO", "NOINFO": "NO_INFO",
+    "SIN INFO": "NO_INFO", "SIN EVIDENCIA": "NO_INFO",
+}
+
+
+def _leer_etiquetas_del_excel(
+    contenido: bytes,
+) -> tuple[list[EtiquetaExperto], dict[str, str], list[str]]:
+    """
+    Extrae las correcciones del experto del informe exportado.
+
+    Devuelve (etiquetas, justificaciones, avisos). Solo se toman las filas
+    donde el revisor escribió un veredicto: una celda vacía significa "no
+    revisada", no "de acuerdo". Distinguirlo importa, porque dar por buenas las
+    no revisadas inflaría la concordancia con el sistema.
+    """
+    import openpyxl
+
+    try:
+        libro = openpyxl.load_workbook(io.BytesIO(contenido), data_only=True)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail={
+            "codigo": "EXCEL_ILEGIBLE",
+            "mensaje": f"No se pudo abrir el archivo: {e}",
+            "accion_sugerida": "Sube el .xlsx descargado del sistema, con sus hojas.",
+        })
+
+    if _HOJA not in libro.sheetnames:
+        raise HTTPException(status_code=422, detail={
+            "codigo": "HOJA_NO_ENCONTRADA",
+            "mensaje": f"El archivo no tiene la hoja «{_HOJA}».",
+            "accion_sugerida": "Sube el informe generado por el sistema, sin renombrar sus hojas.",
+        })
+
+    hoja = libro[_HOJA]
+    encabezados = [str(c.value or "") for c in hoja[1]]
+
+    def _columna(prefijo: str) -> int | None:
+        for i, titulo in enumerate(encabezados):
+            if titulo.upper().startswith(prefijo.upper()):
+                return i
+        return None
+
+    col_exp = _columna(_COL_EXPERTO)
+    col_jus = _columna(_COL_JUSTIFICACION)
+    col_id = _columna(_COL_CITA_ID)
+    if col_exp is None or col_id is None:
+        raise HTTPException(status_code=422, detail={
+            "codigo": "COLUMNAS_FALTANTES",
+            "mensaje": "Faltan las columnas «TU VEREDICTO» o «cita_id» en la hoja de revisión.",
+            "accion_sugerida": "Exporta el informe de nuevo y rellena sobre ese archivo.",
+        })
+
+    etiquetas: list[EtiquetaExperto] = []
+    justificaciones: dict[str, str] = {}
+    avisos: list[str] = []
+    for n, fila in enumerate(hoja.iter_rows(min_row=2, values_only=True), start=2):
+        if col_exp >= len(fila) or col_id >= len(fila):
+            continue
+        crudo = str(fila[col_exp] or "").strip()
+        cita_id = str(fila[col_id] or "").strip()
+        if not crudo or not cita_id:
+            continue
+        normalizada = _EQUIVALENCIAS.get(crudo.upper().replace("-", " "))
+        if not normalizada:
+            avisos.append(f"Fila {n}: «{crudo}» no es una clasificación válida; se ignoró.")
+            continue
+        etiquetas.append(
+            EtiquetaExperto(cita_id=cita_id, etiqueta_experto=VeredictoTipo(normalizada))
+        )
+        if col_jus is not None and col_jus < len(fila):
+            justificaciones[cita_id] = str(fila[col_jus] or "").strip()
+    return etiquetas, justificaciones, avisos
+
+
+def _persistir_etiquetas(
+    etiquetas: list[EtiquetaExperto], justificaciones: dict[str, str]
+) -> None:
+    """
+    Guarda la corrección en cada Cita. Así el ground truth deja de vivir en un
+    archivo suelto: queda en el grafo y se puede recalcular cuando se quiera.
+    """
+    query = """
+    MATCH (c:Cita {id: $cita_id})
+    SET c.etiqueta_experto = $etiqueta,
+        c.justificacion_experto = $justificacion,
+        c.etiquetado_en = datetime()
+    """
+    with neo4j_service.driver.session(database=settings.neo4j_database) as session:
+        for e in etiquetas:
+            session.run(
+                query, cita_id=e.cita_id, etiqueta=e.etiqueta_experto.value,
+                justificacion=justificaciones.get(e.cita_id, ""),
+            )
+
+
+@router.post(
+    "/{documento_id}/evaluar-excel",
+    response_model=EvaluacionResultado,
+    summary="Evaluar subiendo el informe Excel con la columna del experto rellenada",
+)
+async def evaluar_desde_excel(documento_id: str, archivo: UploadFile = File(...)):
+    """
+    Cierra el circuito de evaluación: el sistema exporta el informe, un experto
+    rellena en la hoja «Revisión» su veredicto y el porqué, y el archivo vuelve
+    por aquí.
+
+    Es lo único que permite medir si el sistema ACIERTA. Las métricas sin
+    referencia (RAGAS) evalúan la coherencia interna de la respuesta, no su
+    correspondencia con la realidad: un veredicto equivocado pero bien
+    argumentado sobre un fragmento pertinente puntúa alto igualmente.
+
+    Las etiquetas quedan guardadas en el grafo, así que la evaluación se puede
+    repetir sin volver a subir el archivo.
+    """
+    contenido = await archivo.read()
+    etiquetas, justificaciones, avisos = _leer_etiquetas_del_excel(contenido)
+
+    if not etiquetas:
+        raise HTTPException(status_code=422, detail={
+            "codigo": "SIN_ETIQUETAS",
+            "mensaje": "No se encontró ningún veredicto del experto en el archivo.",
+            "accion_sugerida": "Rellena la columna «TU VEREDICTO» de la hoja «Revisión» y vuelve a subirlo.",
+        })
+
+    _persistir_etiquetas(etiquetas, justificaciones)
+    if avisos:
+        logger.warning("etiquetas_ignoradas", doc_id=documento_id, avisos=avisos[:5])
+    logger.info(
+        "etiquetas_experto_importadas", doc_id=documento_id,
+        total=len(etiquetas), ignoradas=len(avisos),
+    )
+    return await evaluar(documento_id, EvaluarRequest(etiquetas=etiquetas))
 
 @router.get(
     "/{documento_id}/resultados",

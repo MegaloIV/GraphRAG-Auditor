@@ -29,8 +29,15 @@ class ResultadoCrossRef:
     abstract: Optional[str] = None
     url_pdf: Optional[str] = None
     score_coincidencia: float = 0.0
+    # Lista de referencias que el PROPIO paper cita, tal como la depositó la
+    # editorial. Es metadato puro: llega sin descargar el PDF. Permite saber a
+    # quién atribuye el paper lo que dice, que es lo que distingue un hallazgo
+    # suyo de un resumen de trabajo ajeno.
+    referencias_externas: list[dict] = None
 
     def __post_init__(self):
+        if self.referencias_externas is None:
+            self.referencias_externas = []
         if self.autores_oficiales is None:
             self.autores_oficiales = []
 
@@ -200,6 +207,7 @@ class CrossRefService:
 
         return ResultadoCrossRef(
             encontrado=True,
+            referencias_externas=self._parsear_referencias(item.get("reference") or []),
             doi=item.get("DOI"),
             titulo_oficial=titulo_oficial,
             autores_oficiales=autores,
@@ -208,6 +216,35 @@ class CrossRefService:
             url_pdf=url_pdf,
             score_coincidencia=score,
         )
+
+    @staticmethod
+    def _parsear_referencias(crudas: list[dict]) -> list[dict]:
+        """
+        Normaliza el campo `reference` de Crossref.
+
+        Cada entrada trae, según la editorial, DOI, primer autor, año y título.
+        Se conserva `clave` (el identificador que usa el paper, p. ej. "ref8")
+        porque en las citas numeradas del texto —"[8]"— es lo único que permite
+        resolver a cuál se refiere.
+        """
+        referencias = []
+        for i, ref in enumerate(crudas, start=1):
+            titulo = ref.get("article-title") or ref.get("volume-title") or ""
+            anio = ref.get("year")
+            try:
+                anio = int(str(anio)[:4]) if anio else None
+            except ValueError:
+                anio = None
+            referencias.append({
+                "orden": i,
+                "clave": ref.get("key") or "",
+                "doi": (ref.get("DOI") or "").lower(),
+                "autor": ref.get("author") or "",
+                "anio": anio,
+                "titulo": titulo,
+                "cruda": ref.get("unstructured") or "",
+            })
+        return referencias
 
     @staticmethod
     def _calcular_score(titulo_buscado: str, titulo_encontrado: Optional[str]) -> float:

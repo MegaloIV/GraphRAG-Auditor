@@ -46,7 +46,7 @@ class TestConsultarCita:
         with (
             patch(_P_RUTA, return_value=_RUTA),
             patch(_P_NODOS, return_value=[]),
-            patch(_P_FRAG, return_value=[_FRAGMENTO]),
+            patch(_P_FRAG, return_value=([_FRAGMENTO], None, 0)),
             patch(_P_COSER, return_value=_FRAGMENTO["contenido"]),
         ):
             r = RecuperacionService().consultar_cita("doc-1", "c1")
@@ -61,7 +61,7 @@ class TestConsultarCita:
         with (
             patch(_P_RUTA, return_value=_RUTA),
             patch(_P_NODOS, return_value=[]),
-            patch(_P_FRAG, return_value=[_FRAGMENTO]),
+            patch(_P_FRAG, return_value=([_FRAGMENTO], None, 0)),
             patch(_P_COSER, return_value=_FRAGMENTO["contenido"]),
         ):
             r = RecuperacionService().consultar_cita("doc-1", "c1")
@@ -74,7 +74,7 @@ class TestConsultarCita:
             patch(_P_RUTA, return_value=_RUTA),
             patch(_P_NODOS, return_value=[]),
             patch(_P_COSER, return_value=""),
-            patch(_P_FRAG, return_value=[_FRAGMENTO]) as buscar,
+            patch(_P_FRAG, return_value=([_FRAGMENTO], None, 0)) as buscar,
         ):
             RecuperacionService().consultar_cita("doc-1", "c1")
 
@@ -87,7 +87,7 @@ class TestConsultarCita:
             patch(_P_RUTA, return_value=_RUTA),
             patch(_P_NODOS, return_value=[]),
             patch(_P_COSER, return_value=""),
-            patch(_P_FRAG, return_value=[_FRAGMENTO]) as buscar,
+            patch(_P_FRAG, return_value=([_FRAGMENTO], None, 0)) as buscar,
         ):
             RecuperacionService().consultar_cita("doc-1", "c1", fragmento_oracion=aseveracion)
 
@@ -99,7 +99,7 @@ class TestConsultarCita:
             patch(_P_RUTA, return_value=_RUTA),
             patch(_P_NODOS, return_value=[]),
             patch(_P_COSER, return_value=""),
-            patch(_P_FRAG, return_value=[_FRAGMENTO]) as buscar,
+            patch(_P_FRAG, return_value=([_FRAGMENTO], None, 0)) as buscar,
         ):
             RecuperacionService().consultar_cita("doc-1", "c1", fragmento_oracion="   ")
 
@@ -109,7 +109,7 @@ class TestConsultarCita:
         with (
             patch(_P_RUTA, return_value=_RUTA),
             patch(_P_NODOS, return_value=[]),
-            patch(_P_FRAG, return_value=[]),
+            patch(_P_FRAG, return_value=([], None, 0)),
         ):
             r = RecuperacionService().consultar_cita("doc-1", "c1")
 

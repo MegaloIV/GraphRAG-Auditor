@@ -19,11 +19,13 @@ en los hallazgos.
 No hay retrieval nuevo: los insumos son los fragmento_evidencia que la
 auditoría (EP-004) dejó persistidos en cada nodo Cita.
 """
+import collections
 import json
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from typing import Optional
 
 import numpy as np
 import structlog
@@ -890,6 +892,141 @@ class CoherenciaService:
         confianza = conf_m.group(1).lower() if conf_m else "media"
         justificacion = just_m.group(1).strip() if just_m else ""
         return tipo, confianza, justificacion
+
+    # ── Exportación del informe ──────────────────────────────────────────────
+
+    _TIPO = {
+        TipoHallazgo.CONTRADICCION_INTERNA: "Contradicción interna",
+        TipoHallazgo.TRIANGULACION: "Triangulación",
+        TipoHallazgo.FUENTE_ISLA: "Fuente isla",
+        TipoHallazgo.CONCEPTO_DEBIL: "Concepto débil",
+    }
+    _RELACION = {"APOYA": "Se apoyan", "CONTRADICE": "Se contradicen",
+                 "COMPLEMENTA": "Se complementan", "CO_MENCION": "Co-mención"}
+    _COLOR = {TipoHallazgo.CONTRADICCION_INTERNA: "FEE2E2",
+              TipoHallazgo.TRIANGULACION: "DCFCE7",
+              TipoHallazgo.FUENTE_ISLA: "FEF3C7",
+              TipoHallazgo.CONCEPTO_DEBIL: "F3F4F6"}
+    _ILEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+    def exportar_excel(self, documento_id: str) -> Optional[bytes]:
+        """Informe de coherencia de una tesis, con el mismo detalle que el de auditoría.
+
+        Cuatro hojas: el resumen del análisis, los hallazgos con las referencias
+        implicadas, las relaciones juzgadas con los dos fragmentos enfrentados y su
+        justificación, y los conceptos extraídos. Devuelve None si el análisis aún no
+        se ha construido.
+        """
+        import io
+
+        import openpyxl
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        from openpyxl.utils import get_column_letter
+
+        respuesta = self.obtener(documento_id)
+        if respuesta is None:
+            return None
+
+        tinta = "1F2937"
+        borde = Border(*[Side(style="thin", color="D1D5DB")] * 4)
+        limpio = lambda v: self._ILEGAL.sub(" ", v) if isinstance(v, str) else v
+
+        def cabecera(h, columnas, anchos):
+            for j, n in enumerate(columnas, 1):
+                c = h.cell(1, j, n)
+                c.font = Font(bold=True, color="FFFFFF", size=10)
+                c.fill = PatternFill("solid", fgColor=tinta)
+                c.border = borde
+                c.alignment = Alignment(vertical="center", wrap_text=True)
+            for j, a in enumerate(anchos, 1):
+                h.column_dimensions[get_column_letter(j)].width = a
+            h.row_dimensions[1].height = 30
+
+        def fila(h, i, valores, ajustan, relleno=None):
+            for j, v in enumerate(valores, 1):
+                c = h.cell(i, j, limpio(v))
+                c.alignment = Alignment(vertical="top", wrap_text=j in ajustan)
+                c.border = borde
+                c.font = Font(size=10)
+                if relleno:
+                    c.fill = PatternFill("solid", fgColor=relleno)
+
+        nodos = {n.id: n for n in respuesta.mapa.nodes}
+        por_tipo = collections.Counter(h.tipo for h in respuesta.hallazgos)
+        wb = openpyxl.Workbook()
+
+        h = wb.active
+        h.title = "Resumen"
+        h["A1"] = "ANÁLISIS DE COHERENCIA ENTRE FUENTES"
+        h["A1"].font = Font(bold=True, size=13, color=tinta)
+        h["A2"] = ("Compara las evidencias recuperadas de papers distintos para detectar si las "
+                   "fuentes citadas se apoyan, se contradicen o no se relacionan. Solo participan "
+                   "las citas con veredicto respaldada o refutada, que son las que tienen "
+                   "evidencia asociada.")
+        h["A2"].font = Font(size=10, italic=True, color="6B7280")
+        h["A2"].alignment = Alignment(wrap_text=True)
+        h.merge_cells("A2:D2")
+        h.row_dimensions[2].height = 42
+        h.cell(4, 1, "Medida").font = Font(bold=True)
+        h.cell(4, 2, "Valor").font = Font(bold=True)
+        h.column_dimensions["A"].width = 46
+        h.column_dimensions["B"].width = 18
+        medidas = [
+            ("Documento", documento_id),
+            ("Análisis construido el", respuesta.construido_en[:19].replace("T", " ")),
+            ("Evidencias analizadas", respuesta.total_evidencias),
+            ("Conceptos extraídos", respuesta.total_conceptos),
+            ("Pares de evidencias comparados", respuesta.total_comparaciones),
+            ("Relaciones establecidas", respuesta.total_relaciones),
+            ("Referencias en el mapa", len(respuesta.mapa.nodes)),
+            ("Referencias aisladas", sum(1 for n in respuesta.mapa.nodes if n.es_isla)),
+        ] + [("Hallazgos · " + self._TIPO[t], por_tipo.get(t, 0)) for t in self._TIPO]
+        for i, (k, v) in enumerate(medidas, 5):
+            h.cell(i, 1, k).border = borde
+            h.cell(i, 2, limpio(v)).border = borde
+
+        h = wb.create_sheet("Hallazgos")
+        cabecera(h, ["Tipo", "Concepto", "Referencias implicadas", "Qué significa", "Confianza"],
+                 [22, 26, 56, 62, 12])
+        orden = {TipoHallazgo.CONTRADICCION_INTERNA: 0, TipoHallazgo.FUENTE_ISLA: 1,
+                 TipoHallazgo.CONCEPTO_DEBIL: 2, TipoHallazgo.TRIANGULACION: 3}
+        for i, x in enumerate(sorted(respuesta.hallazgos, key=lambda y: orden.get(y.tipo, 9)), 2):
+            fila(h, i, [self._TIPO.get(x.tipo, x.tipo), x.concepto or "—",
+                        " | ".join(x.referencias) or "—", x.justificacion, x.confianza or "—"],
+                 {2, 3, 4}, self._COLOR.get(x.tipo))
+        h.freeze_panes = "A2"
+        if respuesta.hallazgos:
+            h.auto_filter.ref = "A1:E%d" % (len(respuesta.hallazgos) + 1)
+
+        h = wb.create_sheet("Relaciones")
+        cabecera(h, ["Relación", "Referencia A", "Referencia B", "Concepto que las vincula",
+                     "Fragmento de A", "Fragmento de B", "Justificación", "Confianza"],
+                 [16, 32, 32, 24, 54, 54, 54, 12])
+        i = 2
+        for l in respuesta.mapa.links:
+            a = nodos[l.source].label if l.source in nodos else l.source
+            b = nodos[l.target].label if l.target in nodos else l.target
+            for det in (l.detalles or [None]):
+                fila(h, i, [self._RELACION.get(l.tipo, l.tipo), a, b,
+                            (det.concepto if det else None) or "—",
+                            (det.evidencia_1 if det else "") or "",
+                            (det.evidencia_2 if det else "") or "",
+                            (det.justificacion if det else "") or "",
+                            (det.confianza if det else "") or "—"],
+                     {2, 3, 4, 5, 6, 7})
+                i += 1
+        h.freeze_panes = "A2"
+
+        h = wb.create_sheet("Conceptos")
+        cabecera(h, ["Concepto", "Referencias que lo mencionan"], [52, 26])
+        for i, c in enumerate(respuesta.mapa.conceptos, 2):
+            fila(h, i, [c.nombre, c.n_referencias], {1})
+        h.freeze_panes = "A2"
+
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        return buffer.getvalue()
+
 
 
 # Singleton

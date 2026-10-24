@@ -1,42 +1,87 @@
 """
 EntidadExtractionService — detección de citas y delimitación de secciones.
 
-Todo se prueba sobre el texto real de la tesis. Las funciones que llaman al LLM
-(extraer_citas / extraer_referencias) no se tocan aquí: lo que se prueba es la
-lógica determinista que decide QUÉ texto se le manda al LLM y cómo se limpia lo
-que devuelve.
+La detección de citas es determinista (sin LLM): se prueba sobre el texto real
+de la tesis. Solo extraer_referencias sigue llamando al LLM y no se toca aquí.
+La clase de regresiones usa textos mínimos, porque recoge formas halladas en
+otras tesis que el PDF de prueba no contiene.
 """
 import re
 
 from app.models.grafo import CitaEnTexto, TipoCita
+from app.services.grafo.extraccion_service import (
+    _oracion_de,
+    detectar_citas_estructuradas,
+)
 
 
-class TestDetectarCitasRegex:
-    """Prefiltro por regex: es lo que ancla la detección antes del LLM."""
+class TestDetectarCitas:
+    """Detección determinista de citas: es la fuente de verdad del pipeline."""
 
     def test_encuentra_citas_en_la_tesis_real(self, svc, texto_tesis):
-        citas = svc._detectar_citas_regex(texto_tesis)
-        assert len(citas) >= 30
+        citas = detectar_citas_estructuradas(texto_tesis)
+        assert len({c.texto for c in citas}) >= 30
 
     def test_detecta_una_parentetica_con_et_al(self, svc, texto_tesis):
-        citas = svc._detectar_citas_regex(texto_tesis)
-        assert "(Edge et al., 2024)" in citas
+        textos = {c.texto for c in detectar_citas_estructuradas(texto_tesis)}
+        assert "(Edge et al., 2024)" in textos
 
     def test_detecta_una_parentetica_de_dos_autores_con_y(self, svc, texto_tesis):
-        citas = svc._detectar_citas_regex(texto_tesis)
-        assert "(Klesel y Wittmann, 2025)" in citas
+        textos = {c.texto for c in detectar_citas_estructuradas(texto_tesis)}
+        assert "(Klesel y Wittmann, 2025)" in textos
 
     def test_todas_las_citas_llevan_un_anio_valido(self, svc, texto_tesis):
-        citas = svc._detectar_citas_regex(texto_tesis)
-        assert all(re.search(r"\b(19|20)\d{2}\b", c) for c in citas)
+        citas = detectar_citas_estructuradas(texto_tesis)
+        assert all(re.search(r"\b(19|20)\d{2}\b|s\.\s?f\.|n\.\s?d\.", c.texto) for c in citas)
 
-    def test_no_devuelve_subcoincidencias_de_otra_cita(self, svc, texto_tesis):
-        citas = svc._detectar_citas_regex(texto_tesis)
-        for cita in citas:
-            assert not any(cita != otra and cita in otra for otra in citas)
+    def test_el_texto_canonico_nunca_trae_saltos_de_linea(self, svc, texto_tesis):
+        # El markdown del PDF parte las citas; el texto guardado debe salir limpio
+        # porque de él dependen la vinculación y la búsqueda en el PDF.
+        citas = detectar_citas_estructuradas(texto_tesis)
+        assert all("\n" not in c.texto and "  " not in c.texto for c in citas)
 
     def test_un_texto_sin_citas_no_devuelve_nada(self, svc):
-        assert svc._detectar_citas_regex("Un párrafo cualquiera sin ninguna cita APA.") == []
+        assert detectar_citas_estructuradas("Un párrafo cualquiera sin ninguna cita APA.") == []
+
+
+class TestDetectarCitasRegresiones:
+    """
+    Formas que el detector anterior perdía. Cada caso viene de una tesis real
+    revisada durante el desarrollo; se reproducen con el texto mínimo porque el
+    PDF de prueba no contiene todas las variantes.
+    """
+
+    def test_una_cita_partida_por_un_salto_de_linea(self):
+        citas = detectar_citas_estructuradas("El modelo (LeCun et\nal., 2015) lo demuestra.")
+        assert [c.texto for c in citas] == ["(LeCun et al., 2015)"]
+
+    def test_un_grupo_produce_una_cita_por_fuente(self):
+        citas = detectar_citas_estructuradas("Varios (Ahnlide et al., 2016; Unlu et al., 2014).")
+        assert [c.texto for c in citas] == ["(Ahnlide et al., 2016)", "(Unlu et al., 2014)"]
+        # Ambas comparten el texto literal: es lo que hay que buscar en el PDF.
+        assert {c.original for c in citas} == {"(Ahnlide et al., 2016; Unlu et al., 2014)"}
+
+    def test_apellidos_compuestos(self):
+        citas = detectar_citas_estructuradas("Como (Hernández Sampieri & Mendoza Torres, 2018).")
+        assert [c.texto for c in citas] == ["(Hernández Sampieri & Mendoza Torres, 2018)"]
+
+    def test_autor_institucional(self):
+        citas = detectar_citas_estructuradas("Según (American Cancer Society, 2018) el riesgo sube.")
+        assert [c.texto for c in citas] == ["(American Cancer Society, 2018)"]
+
+    def test_apellido_con_guion_y_caracteres_no_espanoles(self):
+        textos = {c.texto for c in detectar_citas_estructuradas(
+            "Ver (Johnson-Laird, 2006) y (Vrbančič & Podgorelec, 2020)."
+        )}
+        assert textos == {"(Johnson-Laird, 2006)", "(Vrbančič & Podgorelec, 2020)"}
+
+    def test_el_conector_inicial_no_se_toma_como_apellido(self):
+        citas = detectar_citas_estructuradas("Asimismo, Joshi et al (2022) lo resaltan.")
+        assert [c.texto for c in citas] == ["Joshi et al (2022)"]
+
+    def test_la_prosa_previa_no_se_toma_como_apellido(self):
+        citas = detectar_citas_estructuradas("Según los resultados Smith (2020) mejora.")
+        assert [c.texto for c in citas] == ["Smith (2020)"]
 
 
 class TestSeccionDeReferencias:
@@ -158,20 +203,42 @@ class TestDeduplicarCitas:
         assert len(dedup) == 2
 
 
-class TestExtraerOracionFallback:
-    """Cuando el LLM no devuelve la aseveración, se recorta del propio texto."""
+class TestOracionDe:
+    """La afirmación del tesista que se manda al juez sale del span de la cita."""
 
-    def test_recupera_la_oracion_que_rodea_a_la_cita(self, svc, texto_cuerpo):
-        cita = "(Edge et al., 2024)"
-        bloque = next(b for b in svc._dividir_en_bloques(texto_cuerpo) if cita in b)
-        fragmento = svc._extraer_oracion_fallback(bloque, cita)
-        assert cita in fragmento
-        assert fragmento.endswith(cita)
-        assert len(fragmento) <= 800
+    def test_la_afirmacion_precede_a_una_cita_parentetica(self):
+        t = "Otra cosa. El modelo alcanza 94.2% de exactitud (Smith et al., 2020). Sigue."
+        i, f = t.index("(Smith"), t.index("2020)") + 5
+        assert _oracion_de(t, i, f, hasta_el_final=False) == (
+            "El modelo alcanza 94.2% de exactitud (Smith et al., 2020)"
+        )
 
-    def test_si_la_cita_no_esta_en_el_bloque_devuelve_vacio(self, svc, texto_cuerpo):
-        bloque = svc._dividir_en_bloques(texto_cuerpo)[0]
-        assert svc._extraer_oracion_fallback(bloque, "(Inexistente, 1999)") == ""
+    def test_la_afirmacion_sigue_a_la_cita_cuando_esta_abre_la_oracion(self):
+        # "Según (Autor, año), ..." — cortar antes del paréntesis dejaba un
+        # claim vacío y el juez no tenía nada que verificar.
+        t = "Nada antes. Según (Yusuf et al., 2025), la IA mejora la retención. Fin."
+        i, f = t.index("(Yusuf"), t.index("2025)") + 5
+        assert _oracion_de(t, i, f, hasta_el_final=False).startswith("Según (Yusuf et al., 2025)")
+        assert "retención" in _oracion_de(t, i, f, hasta_el_final=False)
+
+    def test_una_cita_narrativa_arrastra_la_oracion_completa(self):
+        t = "Antes nada. Smith (2020) sostiene que el método mejora 6.7 veces. Fin."
+        i, f = t.index("Smith"), t.index("(2020)") + 6
+        assert _oracion_de(t, i, f, hasta_el_final=True) == (
+            "Smith (2020) sostiene que el método mejora 6.7 veces."
+        )
+
+    def test_una_inicial_no_corta_la_oracion(self):
+        t = "Como indica Westpha E. (2021) el uso crece sin pausa. Fin."
+        i, f = t.index("Westpha"), t.index("(2021)") + 6
+        assert "el uso crece" in _oracion_de(t, i, f, hasta_el_final=True)
+
+    def test_sin_puntuacion_alrededor_se_toma_una_ventana_corta(self):
+        # Tablas y listados no tienen final de oración: antes se arrastraban
+        # 700 caracteres de contenido ajeno al claim.
+        t = "col1 col2 col3 " * 60 + "dato (Vargas, 2024) mas celdas"
+        i, f = t.index("(Vargas"), t.index("2024)") + 5
+        assert len(_oracion_de(t, i, f, hasta_el_final=False)) <= 300
 
 
 class TestParsearJSON:
