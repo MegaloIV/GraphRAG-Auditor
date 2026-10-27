@@ -18,7 +18,9 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
-PDF_TESIS = Path(__file__).parent.parent / "unit" / "Informe de tesis_AlcaldeLavadoMatias (1).pdf"
+# Fuera del repositorio, igual que en unit/conftest.py
+PDF_TESIS = Path(os.environ.get("PDF_TESIS", Path(__file__).parents[3] / "MITESIS" / "Tesis" / "versiones_anteriores"
+                                / "Informe de tesis_AlcaldeLavadoMatias (julio 2026).pdf"))
 EVIDENCIA = Path(os.environ.get("EVIDENCIA_JSON", Path(__file__).parent / "evidencia.json"))
 LIMITE_MB = 10
 ESPERA_PIPELINE_S = 900

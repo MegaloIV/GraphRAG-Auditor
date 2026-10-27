@@ -21,3 +21,9 @@ MITESIS/
 
 # Informes generados (contienen datos de tesis de terceros)
 informes/
+
+# Material de la tesis: vive en MITESIS (partición SHARED), nunca en este repo
+notas/
+conversacion_asesoria*.md
+backend/tests/unit/Informe de tesis*.pdf
+desktop.ini

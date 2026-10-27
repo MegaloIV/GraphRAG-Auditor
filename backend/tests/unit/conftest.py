@@ -8,7 +8,11 @@ referencias, secciones o DOIs se comprueba contra ese documento.
 La extracción del PDF es cara (~7 s), así que se hace una sola vez por sesión
 y se comparte. El PDF se copia a un directorio temporal porque extraer_texto
 escribe un .md de caché junto al original, y el repositorio no debe ensuciarse.
+
+El PDF no está en el repositorio: se lee de MITESIS (enlace ignorado por git en la raíz
+del repo) o de la ruta que indique la variable PDF_TESIS. Si no está, las pruebas se saltan.
 """
+import os
 import shutil
 from pathlib import Path
 
@@ -17,7 +21,8 @@ import pytest
 from app.services.ingesta.pdf_service import pdf_service
 from app.services.grafo.extraccion_service import EntidadExtractionService
 
-PDF_TESIS = Path(__file__).parent / "Informe de tesis_AlcaldeLavadoMatias (1).pdf"
+PDF_TESIS = Path(os.environ.get("PDF_TESIS", Path(__file__).parents[3] / "MITESIS" / "Tesis" / "versiones_anteriores"
+                                / "Informe de tesis_AlcaldeLavadoMatias (julio 2026).pdf"))
 
 
 @pytest.fixture(scope="session")
